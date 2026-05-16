@@ -1,144 +1,156 @@
 # PostNest External Integrations
 
-> Reference for all third-party APIs, protocol libraries, data stores, and authentication mechanisms used by PostNest.
-> File paths are relative to the repository root.
+## Email Transport: Postmark
 
-## External APIs
+Postmark is the sole email transport provider. All inbound and outbound email flows through Postmark's API and webhook infrastructure.
 
-### Postmark
-- **Library**: `github.com/mrz1836/postmark` (v1.9.2).
-- **Wrapper**: `internal/postmark/postmark.go` — Thin abstraction defining `OutboundMessage`, `Attachment`, `SendResponse`, and `InboundPayload` types.
-- **Outbound**: `SendEmail(ctx, apiToken, msg)` relays messages through Postmark's transactional API. Used by `internal/smtp/smtp.go` after SMTP `DATA` ingestion.
-- **Inbound**: Postmark inbound webhooks are received at `POST /webhooks/inbound`, parsed by `internal/postmark/postmark.go` (`ParseInbound`), and enqueued as background jobs.
-- **Domain tokens**: Each `models.Domain` stores a `PostmarkToken` and `PostmarkStream` for per-domain API credentials.
+### Outbound Send API
 
-### Webhook Handling
-- **Handler**: `internal/webhook/webhook.go` — `Handler` struct receives and verifies Postmark webhooks.
-- **Routes** (mounted via chi in `cmd/server/main.go`):
-  - `POST /webhooks/inbound` — `handleInbound()` parses inbound email and enqueues `inbound` job.
-  - `POST /webhooks/bounce` — `handleBounce()` enqueues `bounce` job.
-  - `POST /webhooks/delivery` — `handleDelivery()` enqueues `delivery` job.
-  - `POST /webhooks/spam` — `handleSpam()` enqueues `spam` job.
-- **Verification**: `verify(r)` checks `X-Postmark-Signature` HMAC against `POSTNEST_POSTMARK_WEBHOOK_SECRET`.
-- **Queueing**: Webhooks enqueue jobs via `internal/redis/redis.go` (`LPush`) for async processing by `cmd/worker/main.go`.
+| Detail | Value |
+|---|---|
+| Library | `github.com/mrz1836/postmark` |
+| Wrapper | `internal/postmark/postmark.go` |
+| Auth | Per-request API token (stored per-domain or per-message) |
+| Features | HTML + text bodies, attachments, reply-to, tags, metadata |
 
-## Database Integrations
+**Flow:** SMTP client / webmail draft → `postmark.Client.SendEmail()` → Postmark REST API → recipient.
 
-### PostgreSQL (pgx)
-- **Driver**: `github.com/jackc/pgx/v5` (v5.9.2) with `pgxpool` for connection pooling.
-- **Connection wrapper**: `internal/db/db.go` — `Pool` struct wraps `*pgxpool.Pool`; `New(dsn, maxConns)` creates the pool.
-- **Primary consumers**:
-  - `internal/mailstore/pgstore.go` — Implements `mailstore.Store` with 400+ lines of SQL for messages, labels, threads, attachments, flags, and search.
-  - `internal/contacts/contacts.go` — `PGStore` implements `contacts.Store` with CRUD for address book entries.
-  - `internal/auth/auth.go` — Password hashes, session tokens, API keys, domain membership, and user creation all query PostgreSQL directly via `pgxpool`.
-  - `internal/search/search.go` — Async indexer updates `tsvector` search vectors in the `messages` table.
-  - `internal/reputation/reputation.go` — Queries domain-level whitelist/blacklist/greylist rules.
-- **Migration tooling**: `github.com/golang-migrate/migrate/v4` (v4.19.1) with `lib/pq` driver.
-  - `internal/migrate/migrate.go` — Embeds `migrations/*.sql` via `//go:embed`; exposes `Up`, `Down`, `Version`, `Force`.
-  - `cmd/migrate/main.go` — CLI entry point.
-  - Migration files: `internal/migrate/migrations/000001_init.up.sql`, `000002_fts.up.sql`, `000003_seed_labels.up.sql`.
+### Inbound Webhook
 
-## Cache and Queue Integrations
+| Detail | Value |
+|---|---|
+| Endpoint | `POST /webhooks/postmark/inbound` |
+| Handler | `internal/webhook/webhook.go` |
+| Verification | HMAC-SHA256 signature against `POSTNEST_POSTMARK_WEBHOOK_SECRET` |
+| Deduplication | SHA-256 hash of raw JSON body stored in `webhook_events` table |
+| Enqueue | Raw payload pushed to Redis `queue:jobs` as `inbound` job type |
+| Processor | `internal/workers/inbound.go` parses MIME, stores message + attachments, creates threads |
 
-### Redis (go-redis)
-- **Library**: `github.com/redis/go-redis/v9` (v9.19.0).
-- **Wrapper**: `internal/redis/redis.go` — `Client` embeds `redis.UniversalClient` and exposes app-specific helpers:
-  - `Publish(ctx, channel, message)` — Pub/sub for real-time notifications.
-  - `Enqueue(ctx, queue, payload)` — `LPush` for job queueing.
-  - `Dequeue(ctx, queue, timeout)` — `BRPop` for blocking job consumption.
-- **Worker pool**: `internal/workers/workers.go` — `Pool` consumes jobs via Redis `Dequeue`, dispatches to registered `Processor` implementations.
-- **Job processors**:
-  - `internal/workers/inbound.go` — Processes inbound email payloads.
-  - `internal/workers/bounce.go` — Updates delivery status on bounces.
-  - `internal/workers/delivery.go` — Records successful delivery events.
+### Bounce Webhook
 
-## Authentication Integrations
+| Detail | Value |
+|---|---|
+| Endpoint | `POST /webhooks/postmark/bounce` |
+| Processor | `internal/workers/bounce.go` |
+| Action | Updates `delivery_logs` and `bounce_events` tables; triggers reputation update |
 
-### Argon2id Password Hashing
-- **Library**: `golang.org/x/crypto` (v0.51.0), specifically `argon2` and `bcrypt` packages.
-- **Implementation**: `internal/auth/auth.go`.
-  - `hashPassword(password)` — Generates Argon2id hash with configurable time, memory, and threads.
-  - `verifyPassword(password, encodedHash)` — Constant-time verification using `crypto/subtle`.
-- **Configuration**: TOML/env vars `POSTNEST_SECURITY_ARGON2ID_TIME`, `POSTNEST_SECURITY_ARGON2ID_MEMORY`, `POSTNEST_SECURITY_ARGON2ID_THREADS`.
+### Delivery Webhook
 
-### Session and API Key Management
-- **Implementation**: `internal/auth/auth.go`.
-  - `CreateSession()` — Generates a random token, stores SHA-256 hash in PostgreSQL.
-  - `ValidateSession()` — Validates bearer token or cookie against hash.
-  - `ValidateAPIKey()` — Validates API key (distinct from session tokens).
-  - `Logout()` — Deletes session by token hash.
+| Detail | Value |
+|---|---|
+| Endpoint | `POST /webhooks/postmark/delivery` |
+| Processor | `internal/workers/delivery.go` |
+| Action | Updates `delivery_logs` status to `delivered` |
 
-### ACME / Let's Encrypt TLS Certificates
-- **Library**: `github.com/go-acme/lego/v4` (v4.35.2).
-- **Implementation**: `internal/certmanager/manager.go` — Full certificate lifecycle manager.
-  - `NewManager()` — Loads or generates ACME account key, sets up lego client.
-  - `Start()` — Obtains certificate on first run, then starts background renewal loop.
-  - `GetCertificate()` — Implements `tls.Config.GetCertificate` callback.
-  - `renewalLoop()` — Polls `needsRenewal()` and re-obtains via DNS-01 before expiry.
-- **DNS providers**: Cloudflare supported (`DNSProvider: "cloudflare"` in default config).
-- **Storage**: Account keys and certificates stored on disk under `/var/lib/postnest/certs` (configurable via `POSTNEST_ACME_CERT_DIR`).
+### Spam Complaint Webhook
 
-## Protocol Libraries
+| Detail | Value |
+|---|---|
+| Endpoint | `POST /webhooks/postmark/spam` |
+| Handler | `internal/webhook/webhook.go` (`handleSpam`) |
+| Action | Updates reputation score and logs event |
 
-### IMAP
-- **Library**: `github.com/emersion/go-imap` (v1.2.1).
-- **Server**: `internal/imap/imap.go` — Wraps `imap.Server` with custom backend.
-- **Backend**: `internal/imap/backend.go` — Custom `backend.Backend`, `backend.User`, and `backend.Mailbox` implementations.
-  - Labels map to IMAP mailboxes.
-  - `ListMessages`, `SearchMessages`, `CreateMessage`, `UpdateMessagesFlags`, and `CopyMessages` implemented.
-  - UIDs derived deterministically from message UUIDs (`messageUID()`).
+## Database: PostgreSQL
 
-### SMTP
-- **Library**: `github.com/emersion/go-smtp` (v0.24.0).
-- **Server**: `internal/smtp/smtp.go` — Wraps `smtp.Server` with STARTTLS and `AUTH PLAIN`.
-- **Backend**: `smtpBackend` and `smtpSession` implement `smtp.Backend` and `smtp.Session`.
-  - `Mail()`, `Rcpt()`, `Data()` ingest inbound messages.
-  - Outbound messages are forwarded to Postmark via `internal/postmark/postmark.go`.
+| Detail | Value |
+|---|---|
+| Driver | `github.com/jackc/pgx/v5` / `pgxpool` |
+| Min version | PostgreSQL 16+ |
+| Connection | DSN from `POSTNEST_DATABASE_DSN` (or `POSTGRES_DSN` legacy) |
+| Read replica | Optional `POSTNEST_DATABASE_READ_DSN` |
 
-### DAV (WebDAV / CardDAV / CalDAV)
-- **Libraries**:
-  - `github.com/emersion/go-webdav` (v0.7.0) — WebDAV framework.
-  - `github.com/emersion/go-vcard` (v0.0.0-20241024213814-c9703dde27ff) — vCard parsing/generation.
-  - `github.com/emersion/go-ical` (v0.0.0-20250609112844-439c63cef608) — iCalendar parsing.
-- **Handler**: `internal/dav/dav.go` — Chi-mounted DAV handler.
-  - `carddavBackend` — Full CardDAV implementation backed by `contacts.Store` (`internal/contacts/contacts.go`).
-  - `caldavBackend` — Stubbed; all methods return `fmt.Errorf("not implemented")`.
+### Schema Overview
 
-## Search Integration
+| Table | Purpose |
+|---|---|
+| `domains` | Multi-tenant email domains |
+| `users` | Platform users with Argon2id password hashes |
+| `domain_members` | Role-based domain membership (admin/member) |
+| `auth_sessions` | Session tokens and API keys (SHA-256 hashed) |
+| `messages` | Email messages with `tsvector` full-text search column |
+| `threads` | Conversation groupings |
+| `labels` | Gmail-style labels (system + custom) |
+| `message_labels` | Many-to-many label assignment |
+| `attachments` | File metadata (content stored inline or referenced) |
+| `message_flags` | IMAP flag states (Seen, Answered, Flagged, Deleted, Draft, Recent) |
+| `imap_uids` | IMAP UID mapping (defined, derived from message UUIDs) |
+| `contacts` | Address book entries with vCard support |
+| `contact_reputation` | Per-contact reputation scores |
+| `whitelist` / `blacklist` / `greylist` | Reputation rule tables |
+| `delivery_logs` | Outbound message delivery tracking |
+| `webhook_events` | Raw webhook payload log with dedup hash |
+| `bounce_events` | Structured bounce event records |
 
-- **Engine**: PostgreSQL full-text search (`tsvector` / `tsquery`).
-- **Implementation**: `internal/search/search.go` — `Indexer` queues messages for async indexing and batches updates.
-- **Store integration**: `internal/mailstore/pgstore.go` — `Search()` executes `to_tsvector` queries; `UpdateSearchVector()` refreshes vectors.
-- **Migration**: `internal/migrate/migrations/000002_fts.up.sql` — Adds search vector columns and GIN indexes.
+## Cache & Queue: Redis
 
-## Reputation and Anti-Spam
+| Detail | Value |
+|---|---|
+| Client | `github.com/redis/go-redis/v9` |
+| Wrapper | `internal/redis/redis.go` |
+| Min version | Redis 7+ |
+| Connection | URL from `POSTNEST_REDIS_URL` (or `REDIS_URL` legacy) |
 
-- **Engine**: `internal/reputation/reputation.go` — `Engine` struct evaluates inbound messages.
-- **Rules**: Domain-level whitelist, blacklist, and greylist stored in PostgreSQL.
-- **Decisions**: `Allow`, `Deny`, `Greylist`.
-- **Updates**: `UpdateReputation()` records events (e.g., bounces, spam reports) to adjust contact reputation.
+### Redis Data Structures
 
-## UUID and Crypto Utilities
-
-- **UUID**: `github.com/google/uuid` (v1.6.0). Used in models, sessions, messages, labels, threads, contacts, and attachments.
-- **Crypto**: `golang.org/x/crypto` (v0.51.0) — Argon2id, plus `crypto/subtle` for constant-time comparison in `internal/auth/auth.go`.
-- **Backoff**: `github.com/cenkalti/backoff/v5` (v5.0.3) — Indirect dependency, used by lego for retry logic.
-- **DNS**: `github.com/miekg/dns` (v1.1.72) — Indirect dependency via lego for ACME DNS-01 challenges.
-
-## Integration Map by Package
-
-| Package | Integration | File |
+| Structure | Key Pattern | Purpose |
 |---|---|---|
-| `internal/postmark` | Postmark API | `internal/postmark/postmark.go` |
-| `internal/webhook` | Postmark webhooks | `internal/webhook/webhook.go` |
-| `internal/db` | PostgreSQL (pgx) | `internal/db/db.go` |
-| `internal/migrate` | golang-migrate | `internal/migrate/migrate.go` |
-| `internal/redis` | Redis (go-redis) | `internal/redis/redis.go` |
-| `internal/workers` | Redis job queue | `internal/workers/workers.go` |
-| `internal/auth` | Argon2id, sessions | `internal/auth/auth.go` |
-| `internal/certmanager` | ACME / lego | `internal/certmanager/manager.go` |
-| `internal/imap` | go-imap | `internal/imap/imap.go`, `internal/imap/backend.go` |
-| `internal/smtp` | go-smtp | `internal/smtp/smtp.go` |
-| `internal/dav` | go-webdav, go-vcard, go-ical | `internal/dav/dav.go` |
-| `internal/search` | PostgreSQL tsvector | `internal/search/search.go` |
-| `internal/reputation` | PostgreSQL rules | `internal/reputation/reputation.go` |
+| List | `queue:jobs` | Main job queue (workers call `BRPop`) |
+| Sorted Set | `queue:jobs:delayed` | Delayed retry jobs (score = unix timestamp) |
+| List | `queue:jobs:dead` | Dead-letter queue for exhausted retries |
+| Pub/Sub | `mailbox:<user_id>` | IMAP IDLE notifications |
+
+## ACME / TLS: Let's Encrypt
+
+| Detail | Value |
+|---|---|
+| Library | `github.com/go-acme/lego/v4` |
+| Implementation | `internal/certmanager/manager.go` |
+| Challenge | DNS-01 (configurable provider via lego) |
+| Storage | Account key and certificate on local filesystem |
+| Renewal | Background loop with 30-day threshold |
+
+Configuration section `[acme]` in TOML: `email`, `accept_tos`, `provider`, `domain`, `storage_path`.
+
+## Protocol Servers (Inbound Client Connections)
+
+| Protocol | Port | Library | Status |
+|---|---|---|---|
+| HTTP REST | 8080 | `chi/v5` | ✅ Full |
+| IMAP4rev1 | 143 / 993 | `go-imap` | ✅ LOGIN, LIST, STATUS, FETCH, SEARCH, APPEND, EXPUNGE, COPY, flag updates, IDLE |
+| SMTP submission | 587 / 465 | `go-smtp` | ✅ AUTH PLAIN + LOGIN, DATA relay to Postmark, TLS |
+| WebDAV / CardDAV | 8080 (mounted) | `go-webdav` | ✅ CardDAV list/get/put/delete |
+| CalDAV | 8080 (mounted) | `go-webdav` / `go-ical` | 🚧 Stub (not implemented) |
+
+### IMAP Integration Points
+- IDLE uses Redis pub/sub (`mailbox:<user_id>`) to notify clients of new mail
+- UIDs derived deterministically from message UUIDs
+- MODSEQ tracked for `imap_uids` table
+
+### SMTP Integration Points
+- AUTH PLAIN and LOGIN mechanisms supported
+- `DATA` handler parses MIME via `go-message`, persists to `mailstore`, then relays to Postmark
+- Sent copy stored in user's mailbox immediately
+
+## Identity & Access
+
+| Mechanism | Implementation |
+|---|---|
+| Password auth | Argon2id (`golang.org/x/crypto/argon2`) |
+| Session auth | Secure HTTP-only cookie or Bearer token header |
+| Domain scoping | Every request carries an active domain ID (from `X-Domain-ID` header or session context) |
+| Role check | `internal/auth` provides `IsDomainAdmin`, `IsDomainMember` |
+| DAV auth | Basic Auth only (no Bearer token support yet) |
+
+## Webhook Security
+
+Postmark webhook signatures are verified in `internal/webhook/webhook.go` using HMAC-SHA256 of the raw JSON body against `POSTNEST_POSTMARK_WEBHOOK_SECRET`.
+
+## Planned / Stub Integrations
+
+| Integration | Status | Location |
+|---|---|---|
+| CalDAV calendar backend | Stub (all methods return "not implemented") | `internal/dav/dav.go` |
+| STARTTLS on IMAP/SMTP | Not implemented | `cmd/server/main.go` TLS config present but STARTTLS missing |
+| Admin REST handlers | Not implemented | Design documents reference; no handlers wired |
+| Frontend UI | Not implemented | API-only; no SPA or server-rendered UI |
+| Systemd service integration | Partial | `scripts/install-systemd.sh` exists; `kardianos/service` referenced but not confirmed wired |

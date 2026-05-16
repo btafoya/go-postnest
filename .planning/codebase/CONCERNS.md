@@ -1,173 +1,240 @@
 # PostNest Codebase Concerns
 
-This document catalogs technical debt, security gaps, performance bottlenecks, fragile logic, and operational risks found in the Go-PostNest codebase. Every item includes the concrete file path where the issue lives.
+This document catalogs technical debt, known issues, security gaps, performance concerns, fragile areas, missing features, testing gaps, and operational concerns identified through thorough static analysis of the codebase.
 
 ---
 
-## 1. Technical Debt
+## 1. Security
 
-### TODOs / Placeholders / Stubs
-- `cmd/server/main.go:103` — Admin REST handler group is mounted but contains only a `// TODO: admin handlers` comment; no actual endpoints.
-- `internal/imap/backend.go:127` — `Status` reports `UidNext = 1` with a `// TODO` comment. `UidValidity` is hard-coded to `1`.
-- `internal/webmail/webmail.go:60` — `listLabels` contains `// TODO: compute unread/total counts per label`; counts are omitted from the response.
-- `internal/webmail/webmail.go:75` — `createLabel` uses `DomainID: u.ID` with a `// TODO: use domain context` comment. The user's UUID is used as a domain placeholder.
-- `internal/webmail/webmail.go:267` — `createDraft` contains `// TODO: parse To into to_addresses`; the `To` field is decoded and then ignored (`_ = msg`).
-- `internal/dav/dav.go:261` — Entire CalDAV backend is a stub; every operation returns `fmt.Errorf("not implemented")`.
-- `internal/webmail/webmail.go:87` — `updateLabel` is a no-op that always returns `ErrNotFound`.
-- `internal/webmail/webmail.go:272` — `updateDraft` is a no-op that returns `200 OK` without persisting anything.
-- `internal/webmail/webmail.go:276` — `sendDraft` is a stub that returns `{ "status": "queued" }` without actually enqueuing a job.
-- `internal/imap/backend.go:92` — `RenameMailbox` returns `fmt.Errorf("rename not supported")`.
-- `internal/dav/dav.go:135` — `CreateAddressBook` returns `fmt.Errorf("create not supported")`.
-- `internal/dav/dav.go:138` — `DeleteAddressBook` returns `fmt.Errorf("delete not supported")`.
+### 1.1 Authentication & Authorization
+- **Weak default Argon2id parameters**: `ARGON2ID_MEMORY=65536` (64MB) with `ARGON2ID_TIME=3` is below current OWASP recommendations (19MB, 2 iterations is common, but 64MB/3 is reasonable for 2024; however, no upgrade path exists for existing hashes).
+- **No password strength policy**: `auth.CreateUser` accepts any password without length, complexity, or entropy checks.
+- **No account lockout**: Failed authentication attempts are not tracked or rate-limited per account, leaving brute-force vulnerability.
+- **Session token rotation missing**: Sessions have a 7-day fixed `MaxAge` with no rotation on use.
+- **Missing 2FA/MFA**: No TOTP, WebAuthn, or backup code support.
+- **API keys share session table**: API keys and browser sessions share `auth_sessions` with different `type` values but identical validation paths, increasing blast radius if token hashing is broken.
+- **IMAP/SMTP auth uses `context.Background()`**: Authentication in `imap/backend.go` and `smtp/smtp.go` uses background contexts with no timeout, risking goroutine leaks on slow auth queries.
 
-### Deprecated / Brittle Patterns
-- `internal/imap/backend.go` — Every IMAP handler instantiates `ctx := context.Background()` instead of deriving a context from the connection or a timeout. This makes cancellation and deadline propagation impossible.
-- `internal/db/db.go:25` — `db.New` uses `context.Background()` for pool creation and the initial ping. Startup will hang indefinitely if PostgreSQL is unreachable.
-- `internal/redis/redis.go:23` — `redis.New` uses `context.Background()` for the initial ping. Same hang risk.
-- `internal/api/errors.go:64` — `As` is a hand-rolled wrapper around `errors.As` that only handles `*AppError` and ignores wrapped errors. Any error wrapped with `fmt.Errorf("...: %w", err)` will fall through to `ErrInternal` even when the root cause is a known `*AppError`.
-- `internal/postmark/postmark.go:48` — `SendEmail` creates a new `lib.NewClient(apiToken, "")` on every invocation. The underlying library may create new HTTP transports each time, defeating connection reuse.
-- `internal/workers/workers.go:97` — `Enqueue` and `worker` both use `time.Now().UnixNano()` as the job ID. Under burst load these IDs can collide because nanosecond precision is not guaranteed unique across goroutines.
-- `internal/imap/backend.go:391` — `messageUID` derives the IMAP UID from the first four bytes of the message UUID (`uint32(msg.ID[0])<<24 | ...`). This is non-monotonic and collisions are likely.
+### 1.2 Transport Security
+- **No STARTTLS support**: Both IMAP (port 143) and SMTP (port 587) run plain-text when TLS is not configured. There is no `STARTTLS` command implementation to upgrade connections mid-flight.
+- **TLS certificate hot-reload gaps**: `certmanager.Manager` stores certificates atomically but IMAP/SMTP servers hold a `*tls.Config` reference; reloading requires restart.
+- **Insecure auth allowed without TLS**: `allowInsecureAuth` defaults to `true` when no certificates are configured, with no enforcement of STARTTLS before auth.
+- **No OCSP stapling or certificate transparency checks**.
+- **CORS allows credentials without origin validation on preflight**: `CORS` middleware allows any origin matching the list, but there is no `Access-Control-Allow-Credentials` header, so cookies are not sent cross-origin. However, this is inconsistent with the `RequireSession` middleware that reads cookies.
 
----
+### 1.3 Input Validation & Sanitization
+- **No Content-Type validation on API**: `webmail.Handler` endpoints accept requests with any `Content-Type`, risking JSON CSRF in legacy browsers.
+- **No CSRF tokens for cookie auth**: The API uses cookie-based sessions but provides no CSRF double-submit cookie or token. While modern browsers block cross-origin JSON POSTs by default, this is a defense-in-depth gap.
+- **No HTML sanitization**: `HTMLBody` from inbound/outbound messages is stored and served raw. XSS is possible if messages are rendered in a webmail UI without client-side sanitization.
+- **Email address validation missing**: No RFC 5322 validation on `From`, `To`, `Cc` addresses before storage or relay.
+- **No attachment malware scanning**: Attachments are stored as raw `BYTEA` with no ClamAV or similar integration.
 
-## 2. Known Issues / Limitations
+### 1.4 Webhook Security
+- **Weak webhook verification**: `webhook.Handler.verify` only checks `X-Postmark-Server-Token` against a plain string secret. No HMAC signature verification of the request body.
+- **No webhook IP allowlisting**: Postmark source IPs are not validated.
+- **No webhook replay protection**: Dedup uses a 5-minute Redis TTL but relies on `MessageID` presence, which may be spoofed or missing.
 
-### Design-Level Gaps
-- `INTEGRATION.md` §Known Limitations — Domain scoping in webmail handlers currently uses `user.ID` as a placeholder for `domainID`. The real domain context (from `X-Domain-ID` header or `domain_members` lookup) is not wired.
-- `INTEGRATION.md` — The `imap_uids` table is defined in the schema but never populated by `mailstore`. UIDs are derived deterministically from message UUIDs, which breaks IMAP correctness.
-- `INTEGRATION.md` — The `messages_update_search_vector()` trigger is created, but workers use direct SQL updates instead of the trigger. Worse, the direct SQL is broken (see Security / Performance sections).
-- `INTEGRATION.md` — Greylist deferral / retry logic is simplified: no background delay is enforced.
-- `INTEGRATION.md` — SMTP only supports `AUTH PLAIN`; `AUTH LOGIN` is not yet implemented.
-- `INTEGRATION.md` — CardDAV only supports a single default address book.
-- `INTEGRATION.md` — DAV auth uses Basic Auth only; Bearer token support is missing.
-
-### Broken Search-Vector Update
-- `internal/mailstore/pgstore.go:467` — `UpdateSearchVector` executes:
-  ```sql
-  SELECT messages_update_search_vector() WHERE id=$1
-  ```
-  This is syntactically invalid: the trigger function takes no arguments and the `WHERE` clause filters the result set of a zero-row function call rather than targeting the row. Full-text search for new messages is effectively broken.
+### 1.5 Data Protection
+- **No encryption at rest**: PostgreSQL stores attachment `BYTEA`, message source, and contact data unencrypted.
+- **Missing PII handling / GDPR**: No data export, right-to-erasure, or retention policy enforcement APIs.
+- **Secrets in config**: `PostmarkToken`, `PostmarkWebhookSecret`, `SessionKey` are loaded from env/config without encryption or secret manager integration.
 
 ---
 
-## 3. Security Concerns
+## 2. SQL & Data Integrity
 
-### Authentication & Transport
-- `cmd/server/main.go:173` — When no TLS certificates or ACME are configured, the server defaults to `allowInsecureAuth = true`. SMTP and IMAP will accept plaintext passwords.
-- `internal/smtp/smtp.go:34` — `AllowInsecureAuth` is passed through from configuration with no STARTTLS upgrade path. The `go-smtp` server will advertise `AUTH PLAIN` on an unencrypted channel.
-- `internal/api/middleware.go:72` — CORS middleware sets `Access-Control-Allow-Origin: *` unconditionally. For a mail platform this is overly permissive and dangerous when combined with cookie-based session auth.
-- `internal/api/middleware.go:146` — `extractToken` reads a cookie named `session` but does not enforce `HttpOnly`, `Secure`, or `SameSite` attributes. Those attributes are only documented in `API-SPEC.md` but not enforced in code.
-- `internal/auth/auth.go` — `SESSION_KEY` is loaded from an environment variable with no validation. The default examples use `changeme` and `change-me-in-production`, making it easy to deploy with a weak signing key.
+### 2.1 SQL Injection Risks
+- **Sort column injection in `ListMessages`**: `internal/mailstore/pgstore.go:143` uses `fmt.Sprintf` to interpolate `sortCol` and `order` into the query. The values are drawn from a whitelist (`created_at`, `date`, `subject`, `from`, `size`), but a bug or future change that accepts user input directly would create an injection vector. This pattern should be replaced with a parameterized switch statement.
+- **Dynamic column in `UpdateReputation`**: `internal/reputation/reputation.go:79` uses `fmt.Sprintf` to interpolate a column name (`sent_count`, `received_count`, etc.). While controlled by a switch, this is fragile.
 
-### Input Validation & Authorization
-- `internal/smtp/smtp.go:95` — `Mail` accepts any `from` address without validating that the sender domain matches the authenticated user's domain membership. The design doc (`PROTOCOL-DESIGN.md`) says this should return `550`, but the check is missing.
-- `internal/smtp/smtp.go:97` — `Rcpt` accepts any recipient without format validation or rate limiting.
-- `internal/webhook/webhook.go:107` — `verify` checks `X-Postmark-Server-Token` against a shared secret **or** returns `true` if the secret is empty (`h.secret == ""`). An empty secret disables all webhook authentication. Postmark's proper signature verification is not implemented.
-- `internal/webmail/webmail.go` — Most handlers trust `api.UserFromContext(r.Context())` but do not verify that the requested resource belongs to the user's active domain.
+### 2.2 Transaction & Consistency Gaps
+- **Non-atomic bounce processing**: `bounce.go` queries `delivery_logs` for `id` and `domain_id`, then separately inserts a `bounce_events` row. If the process crashes between steps, the bounce event is lost.
+- **Auth label seeding outside user creation tx**: `auth.go:CreateUser` begins a transaction for user insertion, but the system label seeding query runs inside the same transaction (good). However, it seeds labels for *all* domain memberships via `domain_members` lookup — if the caller did not set `domain_id` before calling, labels may be missing.
+- **Thread creation race**: `FindOrCreateThread` has a check-then-act pattern without serialization; concurrent inbound messages with the same subject can create duplicate threads.
+- **Search vector is a no-op**: `UpdateSearchVector` (pgstore.go:504) does `UPDATE messages SET updated_at = updated_at WHERE id=$1`, failing to update `search_vector`. The trigger handles it on INSERT/UPDATE, but if the trigger is dropped or bypassed, search becomes stale.
+- **Missing `delivery_logs` creation on outbound send**: `smtp.go` and `send.go` send via Postmark but never write a `delivery_logs` row, making bounce/delivery webhook correlation impossible for freshly sent messages.
 
-### Secret Handling
-- `docker-compose.yml:36` — `POSTNEST_SECURITY_SESSION_KEY` is injected from an env var but can be empty.
-- `scripts/install-systemd.sh:104` — The install script creates a PostgreSQL user with the literal password `changeme` if the DB user does not exist.
-- `internal/config/template.go` — The generated config template contains `postgres://postnest:changeme@localhost:5432/postnest?sslmode=disable` as the default DSN.
+### 2.3 Schema & Indexing Concerns
+- **`messages.source` is `NOT NULL` but may be empty**: Many inbound paths (webhook) and outbound paths (SMTP) do not populate `Source`, yet the column is `NOT NULL` with no default.
+- **Missing partial index on `messages.is_read`**: Label unread counts scan all messages per label; a partial index `WHERE is_read = false` would help.
+- **`imap_uids` table is unused**: The schema defines `imap_uids` but `imap/backend.go` derives UIDs from UUID bytes, causing collisions and no stability across sessions.
 
 ---
 
-## 4. Performance Concerns
+## 3. Unimplemented / Stub Features
 
-### N+1 / Large Result Sets
-- `internal/imap/backend.go` — `ListMessages`, `SearchMessages`, `UpdateMessagesFlags`, `CopyMessages`, and `Expunge` all call `ListMessages(..., mailstore.ListOptions{Limit: 10000})`. For large mailboxes this loads up to 10,000 rows into memory and then filters them in Go.
-- `internal/mailstore/pgstore.go` — `ListMessages` runs a `COUNT(*)` subquery before the data query. On mailboxes with millions of messages, `COUNT(*)` with a `JOIN` can be expensive.
-- `internal/mailstore/pgstore.go` — `GetThread` fetches up to 1,000 messages for a thread with no pagination.
-- `internal/imap/backend.go:140` — `ListMessages` fetches all messages, then calls `GetFlags` individually for each message inside the loop. This is an N+1 query pattern.
+### 3.1 CalDAV (`internal/dav/dav.go`)
+- **Entire CalDAV backend is stubbed**: All 9 methods return `fmt.Errorf("not implemented")`. Calendar sync clients will receive hard errors.
+- **No WebDAV file storage backend**: Only CardDAV and CalDAV routes are mounted; no generic WebDAV file support.
 
-### Memory Pressure / Large Allocations
-- `internal/smtp/smtp.go:102` — The SMTP `Data` handler reads the entire message body with `io.ReadAll(body)` into a single `[]byte`. The config allows messages up to 50 MB, so a single email can allocate 50 MB before parsing even begins.
-- `internal/smtp/smtp.go` — Each MIME part is also read into memory (`io.ReadAll(p.Body)`). Attachments are collected as in-memory slices.
-- `internal/workers/inbound.go` — The inbound processor base64-decodes every attachment into memory. No size limit is enforced before decoding.
-- `internal/mailstore/pgstore.go` — `CreateMessage` stores the full RFC822 source and all attachment data as PostgreSQL `BYTEA` in a single transaction. Large attachments bloat the transaction log and connection memory.
+### 3.2 STARTTLS
+- **No `STARTTLS` command in SMTP**: `go-smtp` supports it, but the backend does not implement the `StartTLS` interface.
+- **No `STARTTLS` in IMAP**: `go-imap/server` supports it, but not configured.
 
-### Missing Indexes / Query Efficiency
-- `internal/mailstore/pgstore.go` — `Search` queries use `WHERE domain_id=$1 AND user_id=$2 AND search_vector @@ plainto_tsquery('english',$3)`. The GIN index `messages_search_vector_idx` only covers `search_vector`; PostgreSQL will still scan a large portion of the index when the user has many messages. A composite index on `(domain_id, user_id, search_vector)` is missing.
-- `internal/mailstore/pgstore.go` — `FindOrCreateThread` uses `subject` (raw text) as the lookup key instead of a normalized hash, and appends to a `TEXT[]` array (`array_append`). Arrays grow unbounded and updates become slower over time.
-- `internal/mailstore/pgstore.go` — `CreateAttachments` loops over attachments and performs individual `INSERT` statements. No `COPY` or batch insert is used.
+### 3.3 Spam & Reputation
+- **Spam webhook handler exists but no processor**: `webhook.go` enqueues `"spam"` jobs, but `cmd/worker/main.go` does not register a processor. Jobs will be silently dropped with "no processor for job type" warnings.
+- **Greylist decision returns but not enforced**: `reputation.Engine.EvaluateInbound` returns `DecisionGreylist`, but no code path actually delays or rejects greylisted messages.
+- **No SPF, DKIM, or DMARC validation**: Inbound processing trusts Postmark's relay but does not independently verify sender authenticity.
 
----
-
-## 5. Fragile Areas
-
-### IMAP State Machine
-- `internal/imap/backend.go:127` — `UidNext` and `UidValidity` are hard-coded. If a client caches these values and the server restarts, clients will see unchanged values even after mailbox mutations, causing sync bugs.
-- `internal/imap/backend.go:391` — `messageUID` is not stable across resyncs because it depends on the message UUID, which is random. Two different sessions can produce different UID mappings for the same message if the UID table is ever populated later.
-- `internal/imap/backend.go:26` — `Login` selects `domains[0].DomainID` for multi-domain users. There is no mechanism for a user to choose which domain to access.
-- `internal/imap/backend.go:213` — `SearchMessages` returns the UID of **every** message in the mailbox, completely ignoring the `criteria` parameter. Clients relying on server-side search will receive incorrect results.
-
-### SMTP Relay Error Handling
-- `internal/smtp/smtp.go` — After successfully relaying to Postmark, the code attempts to store a copy in the `Sent` label. If `CreateMessage` fails, the error is only logged (`slog.Default().Error`). The SMTP client already received `250 OK`, so the message is permanently missing from the local mailstore.
-- `internal/smtp/smtp.go` — Transient vs permanent failure classification is coarse: any Postmark error returns `451`, and any `res.ErrorCode != 0` returns `550`. There is no retry backoff or queueing for transient Postmark failures inside the SMTP path.
-
-### Webhook Idempotency
-- `internal/webhook/webhook.go:107` — No signature verification and no idempotency key. Postmark retries will create duplicate Redis jobs.
-- `internal/webhook/webhook.go` — Webhook payloads are not persisted to the `webhook_events` table before enqueuing. If Redis is unavailable, the event is lost with no audit trail.
-
-### Worker Reliability
-- `internal/workers/workers.go:97` — Failed jobs are re-enqueued **immediately** with no exponential backoff or jitter. A poison-pill job will hammer the CPU and Redis.
-- `internal/workers/workers.go:97` — After `MaxAttempts` (3), the job is silently dropped. There is no dead-letter queue or alerting.
-- `internal/workers/workers.go:55` — The `worker` loop uses `BRPop` with a timeout equal to `pollInterval` (default 5s). On shutdown, workers may block for up to 5s before noticing the cancelled context.
-- `internal/workers/workers.go` — `LPush` / `BRPop` provides at-most-once delivery semantics if a worker crashes between `BRPop` and `Process`. No acknowledgment mechanism exists.
-
-### Transaction / Data Integrity
-- `internal/mailstore/pgstore.go:268` — `ApplyLabels` ignores errors from the `DELETE` statement (`_, _ = tx.Exec(...)`). If the delete fails but the subsequent insert succeeds, the message will end up with more labels than intended.
-- `internal/mailstore/pgstore.go:353` — `CreateAttachments` does not run inside the `CreateMessage` transaction. If the message insert succeeds but an attachment insert fails, the message exists without its attachments.
+### 3.4 Missing API Endpoints
+- **No user settings API**: `users.settings` and `domains.settings` JSONB columns have no CRUD endpoints.
+- **No domain administration CRUD**: Domains are created via migrations or manual DB insertion; no REST API exists.
+- **No admin audit log**: No table or API for tracking admin actions (user creation, domain changes, etc.).
+- **No metrics/health depth**: `/healthz` pings DB and Redis but does not check worker queue depth, dead letter queue length, or certificate expiry.
 
 ---
 
-## 6. Missing Features / Incomplete Implementations
+## 4. Performance & Scalability
 
-- **Admin REST API** — `cmd/server/main.go:103` mounts the admin route group but registers zero handlers.
-- **CalDAV** — `internal/dav/dav.go:261` is a complete stub; no `calendar_events` table exists.
-- **WebDAV Files** — `design/PROTOCOL-DESIGN.md` §3.4 describes file storage endpoints, but no WebDAV handler is implemented in `internal/dav`.
-- **STARTTLS** — `INTEGRATION.md` lists STARTTLS on IMAP/SMTP as unimplemented.
-- **SMTP LOGIN Auth** — Only `AUTH PLAIN` is advertised (`internal/smtp/smtp.go:266`).
-- **Rate Limiting** — `design/COMPONENT-DESIGN.md` documents a `RateLimiter` middleware, but it is not present in `internal/api/middleware.go`.
-- **Greylist Retry Delay** — Simplified evaluation with no background timer or deferral queue.
-- **IMAP UID Table Population** — `imap_uids` is defined in the schema but never written to by `mailstore`.
-- **Draft Send / Update** — `internal/webmail/webmail.go:272` and `:276` are no-op stubs.
+### 4.1 Database
+- **N+1 queries in IMAP**: `ListMailboxes` calls `CountTotalByLabel` and `CountUnreadByLabel` per label in a loop via `webmail.go`. For 20 labels, this is 40 extra queries per request.
+- **Unbounded `LIMIT` in IMAP**: `imapMailbox.ListMessages` uses `mailstore.ListOptions{Limit: 10000}` with no pagination. A mailbox with 50k messages will OOM or timeout.
+- **Full-table scans in search**: `Search` uses `plainto_tsquery('english', $3)` but `search_vector` is a `TSVECTOR`. The GIN index helps, but ranking with `ts_rank_cd` on large result sets is CPU-heavy. No query timeout is enforced.
+- **No read replica usage**: `PostgresReadDSN` is loaded from config but never used. All queries hit the primary.
 
----
+### 4.2 Memory & Goroutines
+- **Unbounded rate limiter map**: `api.RateLimiter.clients` grows forever. IPs that hit the limiter once are never evicted from the map until process restart.
+- **IMAP `context.Background()` leaks**: Every IMAP command spawns a new background context. A long-lived IMAP session with thousands of commands will leak context trees.
+- **Attachment streaming**: `GetAttachment` loads full `BYTEA` into memory. Large attachments will cause memory pressure.
 
-## 7. Testing Gaps
-
-- **Only one test file exists:** `internal/config/loader_test.go`.
-- **Zero unit tests for:** `internal/auth`, `internal/mailstore`, `internal/api`, `internal/imap`, `internal/smtp`, `internal/webhook`, `internal/workers`, `internal/postmark`, `internal/dav`, `internal/contacts`, `internal/reputation`, `internal/search`, `internal/certmanager`, `internal/db`, `internal/redis`.
-- **No integration tests** for the SMTP relay path, webhook processing, IMAP command sequences, or search indexing.
-- **No benchmarks** for hot paths such as `ListMessages`, `Search`, or `CreateMessage` with large attachments.
-- **No fuzz tests** for MIME parsing in `internal/smtp/smtp.go` or vCard parsing in `internal/dav/dav.go`.
+### 4.3 Caching
+- **No caching layer for hot paths**: Label lists, user sessions, domain configs are queried on every request.
+- **Redis only used for queues and dedup**: No session cache, no rate-limiting cache, no domain config cache.
 
 ---
 
-## 8. Operational Concerns
+## 5. Error Handling & Robustness
 
-### Observability
-- No metrics (Prometheus / OpenTelemetry) are exposed. Queue depth, processing latency, DB connection pool usage, and SMTP transaction rates are invisible.
-- `internal/api/middleware.go:59` — The `Recovery` middleware catches panics but only emits a generic `fmt.Errorf("panic: %v", rec)` with no stack trace. Debugging production panics is extremely difficult.
+### 5.1 Silent Failures
+- **`UpdateSearchVector` is a no-op**: See 2.2. It silently does nothing.
+- **Label count errors ignored**: `webmail.listLabels` calls `CountTotalByLabel` and `CountUnreadByLabel` but discards errors with `_`. Database outages will show zero counts without error.
+- **Auth label seeding ignores errors**: `CreateUser` uses `_, _ = tx.Exec(...)` for label seeding. If label insertion fails, the user is created without labels, breaking their inbox.
+- **Thread creation failure is only a warning**: `inbound.go` logs `thread find/create failed` as Warn but continues. Messages may be orphaned from threads.
+- **Attachment decode failure is a warning**: Inbound attachments that fail base64 decode are skipped with a warning; the message is stored without them.
 
-### Graceful Shutdown
-- `cmd/server/main.go` — IMAP and SMTP servers are stopped with `Close()`. There is no drain period for active TCP connections; clients mid-transaction will be force-disconnected.
-- `cmd/worker/main.go` — Shutdown waits a fixed 30 seconds (`shutdownCtx.Done()`) but does not track in-flight jobs. A long-running job can be aborted mid-process.
-- `cmd/server/main.go:145` — `certMgr.Start(context.Background())` uses a background context that is never cancelled. If the ACME directory is unreachable, startup hangs indefinitely.
+### 5.2 Missing Timeouts
+- **Postmark client has no HTTP timeout**: `postmark.NewClient` wraps `mrz1836/postmark` but does not configure the underlying HTTP client timeout. A hung Postmark API call will block workers indefinitely.
+- **IMAP server `ListenAndServe` has no connection timeout**: Idle IMAP connections can hang forever.
+- **SMTP `Data` uses a 60s timeout but no deadline on the reader**: A slow client can hold the connection open.
 
-### Health Checks
-- `/healthz` only pings PostgreSQL and Redis. There is no health check for the SMTP listener, IMAP listener, or certificate validity.
-
-### Data Durability
-- Webhook events are not written to `webhook_events` before enqueueing. If Redis is down or the worker crashes, the event is gone with no record.
-- `internal/redis/redis.go` — No connection retry or circuit-breaker logic. A transient Redis network blip will cause immediate worker failures and webhook `500` responses.
-
-### Resource Leaks
-- `internal/smtp/smtp.go:42` — `Start` spawns a goroutine that waits on `ctx.Done()` and then calls `s.srv.Close()`. If the server is stopped via `Stop()` first, the goroutine leaks because `ctx` may never be cancelled (the SMTP `Server.Start` takes a background context in `cmd/server/main.go`).
-- `internal/certmanager/manager.go` — The renewal ticker goroutine is started but `Stop` only signals `stopCh`. If `renewalLoop` is blocked on network I/O, it may not exit promptly.
+### 5.3 Worker Resilience
+- **No circuit breaker for Postmark**: If Postmark is down, workers will retry with fixed 5s backoff, hammering the downstream.
+- **No jitter in retry backoff**: Workers use `time.Duration(job.Attempts) * 5 * time.Second`, causing thundering herd on recovery.
+- **Dead letter queue is a black hole**: `queue:dead` has no inspection API, no alerting, and no automatic reprocessing.
+- **Job payload has no schema validation**: Processors unmarshal raw JSON into `map[string]any` or structs without version fields. A schema change will cause silent deserialization failures.
 
 ---
 
-*Document generated from direct source inspection. All file paths are relative to repository root.*
+## 6. Testing Gaps
+
+### 6.1 Missing Unit Tests
+The following packages have **zero** tests:
+- `internal/auth` (critical: password hashing, session management)
+- `internal/certmanager` (critical: TLS certificate lifecycle)
+- `internal/contacts`
+- `internal/dav` (CardDAV/CalDAV logic)
+- `internal/db`
+- `internal/imap` (backend logic)
+- `internal/logger`
+- `internal/migrate`
+- `internal/models`
+- `internal/postmark`
+- `internal/reputation`
+- `internal/search`
+- `internal/smtp` (only `loginServer` and mechanism enumeration tested)
+- `internal/webmail` (only draft create/update tested)
+
+### 6.2 Integration Test Gaps
+- **No end-to-end SMTP/IMAP tests**: No black-box tests against a running server.
+- **No webhook signature/hMAC tests**: Tests only cover dedup logic.
+- **No worker integration tests with real Postgres**: All worker tests use miniredis but mock processors; no test validates database side effects.
+- **No migration rollback tests**: Migrations have `.up.sql` but no `.down.sql` files.
+
+### 6.3 Test Quality Issues
+- `webmail_test.go` uses a mock store that ignores `domainID` and `userID` filters, so authorization logic is untested.
+- `middleware_test.go` tests CORS and rate limiting but does not test `RequireSession` or `RequireDomainAdmin`.
+- `smtp_test.go` does not test `Mail`, `Rcpt`, or `Data` commands.
+
+---
+
+## 7. Operational Concerns
+
+### 7.1 Observability
+- **No structured metrics**: No Prometheus, StatsD, or OpenTelemetry metrics. Queue depth, auth failures, SMTP commands, IMAP operations are invisible.
+- **No distributed tracing**: No trace IDs propagated to Postmark or between worker jobs.
+- **Logging lacks severity tuning**: `logger.New` hardcodes `slog.LevelInfo` with no env override in production.
+- **No request logging for IMAP/SMTP**: Only HTTP requests are logged.
+
+### 7.2 Deployment & Configuration
+- **Config file path is hardcoded to `/etc/postnest/postnest.conf`**: No graceful fallback if the file is missing (it does skip, but the default path is Unix-specific).
+- **Dockerfile uses `root`**: `Dockerfile.server`, `Dockerfile.worker`, `Dockerfile.migrate` do not create a non-root user.
+- **No graceful shutdown for IMAP**: `imap.Server.Stop()` calls `srv.Close()` but does not wait for active connections to finish.
+- **No readiness probe endpoint**: `/healthz` is used for liveness but doubles as readiness. A separate readiness endpoint that checks worker registration would be safer.
+
+### 7.3 Data Retention & Compliance
+- **No automated message retention**: No policy engine to delete messages older than N days.
+- **No attachment deduplication**: Identical attachments across messages are stored separately.
+- **No backup/restore API**: No export of user mailboxes or domain data.
+
+---
+
+## 8. Code Quality & Maintainability
+
+### 8.1 Duplication
+- **`isClosedErr` duplicated** in `internal/imap/imap.go` and `internal/smtp/smtp.go`.
+- **`context.Background()` auth pattern duplicated** in IMAP `Login`, SMTP `Auth`, and SMTP `Mail`.
+- **`writeJSON` duplicated** in `cmd/server/main.go` and `internal/webmail/webmail.go`.
+
+### 8.2 Magic Numbers & Strings
+- `10000` used as IMAP message limit in multiple places.
+- `5 * time.Second` used as SMTP auth timeout, webmail domain lookup timeout, and Redis ping timeout.
+- `30*time.Second` used as shutdown timeout in server and worker.
+- `720*time.Hour` (30 days) hardcoded as cert renewal threshold.
+- Color `#4285f4` hardcoded as default label color in schema, migrations, and Go code.
+
+### 8.3 Interface Bloat
+- `mailstore.Store` has 25 methods, making it a "fat interface." The mock in tests must implement all of them, even though most endpoints only use a subset.
+- `auth.Service` mixes authentication, user management, domain queries, and session management. Separation into `UserStore`, `SessionStore`, and `DomainStore` would improve testability.
+
+---
+
+## 9. IMAP/SMTP Protocol Compliance
+
+### 9.1 IMAP
+- **UIDs are not stable**: `messageUID()` derives UIDs from the first 4 bytes of the UUID. This is not stable across mailbox reloads and can collide.
+- **MODSEQ not implemented**: `Status` returns `UidValidity` derived from label ID but `MODSEQ` is not tracked, breaking CONDSTORE/QRESYNC.
+- **BodyStructure is a stub**: `FetchBodyStructure` always returns `text/plain` with the length of `PlainText`, even for HTML or multipart messages.
+- **No RFC822 source for outbound messages**: Outbound messages stored via SMTP `Data` may lack `Source`, so `FetchRFC822` returns an empty body.
+- **Search is a pass-through**: `SearchMessages` ignores criteria and returns all message UIDs.
+
+### 9.2 SMTP
+- **No `SIZE` extension advertisement**: `maxMsgSize` is enforced in `Data` but not advertised in `EHLO` response.
+- **No `8BITMIME` or `SMTPUTF8` support**.
+- **Bcc addresses are exposed**: `Data` stores `BccAddresses` in the message record. While Postmark strips Bcc, local storage does not.
+- **No queueing for outbound SMTP**: Messages are relayed to Postmark synchronously in `Data`. A Postmark outage causes immediate 451/550 errors to the client.
+
+---
+
+## 10. Recommended Priority Order
+
+| Priority | Concern | Files |
+|----------|---------|-------|
+| **P0** | SQL injection via `fmt.Sprintf` ORDER BY | `mailstore/pgstore.go` |
+| **P0** | `UpdateSearchVector` is a no-op | `mailstore/pgstore.go` |
+| **P0** | Missing `delivery_logs` on outbound send | `smtp/smtp.go`, `workers/send.go` |
+| **P1** | No STARTTLS support | `smtp/smtp.go`, `imap/imap.go` |
+| **P1** | CalDAV entirely stubbed | `dav/dav.go` |
+| **P1** | Unbounded rate limiter memory growth | `api/middleware.go` |
+| **P1** | No Postmark HTTP timeout | `postmark/postmark.go` |
+| **P1** | Missing auth/account lockout tests | `auth/auth.go` |
+| **P2** | HTML sanitization missing | `workers/inbound.go`, `webmail/webmail.go` |
+| **P2** | Greylist decision not enforced | `reputation/reputation.go`, `workers/inbound.go` |
+| **P2** | Spam processor missing | `cmd/worker/main.go` |
+| **P2** | No metrics/observability | `cmd/server/main.go` |
+| **P3** | Read replica unused | `db/db.go`, `mailstore/pgstore.go` |
+| **P3** | Attachment deduplication | `mailstore/pgstore.go` |
+| **P3** | IMAP UID stability | `imap/backend.go` |
+
+---
+
+*Generated from static analysis of commit at time of writing.*

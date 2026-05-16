@@ -1,340 +1,135 @@
-# PostNest Coding Conventions
+# Code Conventions
 
-This document catalogs the coding conventions and design patterns used throughout the PostNest Go 1.25 codebase.
+This document captures the coding style, naming rules, architectural patterns, error handling, and interface design used across the Postnest Go codebase.
 
----
+## Language & Formatting
 
-## Code Style
+- **Go 1.25** — the module pins `go 1.25.0`.
+- Standard `gofmt` formatting is assumed; no custom style overrides are visible.
+- Imports are grouped in three blocks: stdlib, third-party, internal packages.
+- File names are lowercase snake_case (e.g. `errors.go`, `middleware_test.go`, `pgstore.go`).
 
-- **Formatting**: Standard `gofmt` / `goimports`. No custom formatters.
-- **Line length**: No enforced limit; long SQL queries are written as raw multi-line strings.
-- **Imports**: Grouped into three blocks: stdlib, third-party, then internal packages.
+## Naming
 
+| Category | Rule | Example |
+|----------|------|---------|
+| Package | Matches directory name, short and singular | `package api`, `package mailstore` |
+| Exported type | PascalCase | `AppError`, `RateLimiter`, `PGStore` |
+| Interface | Noun / capability name | `Processor`, `DomainLister`, `Store` |
+| Constructor | `New<Name>` | `NewPool`, `NewHandler`, `NewPGStore` |
+| Exported func / method | PascalCase | `WriteError`, `RequireSession` |
+| Unexported helper | camelCase, starts lower | `extractToken`, `isClosedErr`, `toScreamingSnakeCase` |
+| Variable / const | camelCase / PascalCase depending on export | `ctxKeyUser`, `queueJobs`, `ErrNotFound` |
+| Error sentinel | `Err<Name>` | `ErrUnauthorized`, `ErrRateLimited` |
+| Test helper | `setup<TestSubject>` or `newTestHandler` | `setupTestRedis`, `newTestHandler` |
+
+## Structs & Models
+
+- Models live in `internal/models` and are plain structs with exported fields. No ORM tags are used; fields are scanned manually with `pgx`.
+- ID fields are `github.com/google/uuid` (`uuid.UUID`).
+- Timestamps are `time.Time` and are set to `time.Now().UTC()` before persistence.
+- Nullable foreign keys use pointers (e.g. `ThreadID *uuid.UUID`).
+- Other slices use value types (e.g. `ToAddresses []string`).
+- Handler structs hold their dependencies explicitly:
   ```go
-  // internal/mailstore/pgstore.go
-  import (
-      "context"
-      "fmt"
-      "time"
-
-      "github.com/google/uuid"
-      "github.com/jackc/pgx/v5"
-      "github.com/jackc/pgx/v5/pgxpool"
-
-      "github.com/go-postnest/postnest/internal/models"
-  )
+  type Handler struct {
+      store mailstore.Store
+      auth  DomainLister
+      redis *redis.Client
+  }
   ```
-
-- **Comments**: Every exported symbol has a full-sentence comment starting with the symbol name. Unexported helpers are documented when non-trivial.
-
----
-
-## Naming Conventions
-
-| Category | Pattern | Example |
-|----------|---------|---------|
-| **Packages** | Single word, lowercase, no underscores | `mailstore`, `certmanager`, `webhook` |
-| **Types** | PascalCase, descriptive | `PGStore`, `AppError`, `ListOptions` |
-| **Interfaces** | Noun describing capability | `Store`, `Processor` |
-| **Constructors** | `New` or `New<T>` | `NewLoader`, `NewPGStore`, `NewManager` |
-| **Methods** | Verb or verb-noun | `CreateMessage`, `CountUnreadByLabel` |
-| **Variables** | camelCase, short when scoped | `ctx`, `cfg`, `tx`, `w`, `r` |
-| **Constants** | camelCase or PascalCase if exported | `defaultConfigPath` |
-| **Context keys** | Unexported typed string | `type ctxKey string` |
-| **Error variables** | `Err<Name>` | `ErrNotFound`, `ErrUnauthorized` |
-| **Test functions** | `Test<Struct>_<Method>_<Scenario>` | `TestLoader_Load_FromFile` |
-
----
-
-## Error Handling Patterns
-
-### Wrapping with Context
-All errors are wrapped using `fmt.Errorf("...: %w", err)` to preserve the causal chain:
-
-```go
-// internal/db/db.go
-func New(dsn string, maxConns int) (*Pool, error) {
-    cfg, err := pgxpool.ParseConfig(dsn)
-    if err != nil {
-        return nil, fmt.Errorf("parse postgres dsn: %w", err)
-    }
-    // ...
-}
-```
-
-### Sentinel Errors
-Package-level sentinel errors are declared as `var` and checked with `==`:
-
-```go
-// internal/mailstore/pgstore.go
-var ErrNotFound = fmt.Errorf("not found")
-
-// Checked at call sites:
-if err == pgx.ErrNoRows {
-    return nil, ErrNotFound
-}
-```
-
-### Custom HTTP Error Type
-The `api` package defines a unified `AppError` type for all HTTP responses:
-
-```go
-// internal/api/errors.go
-type AppError struct {
-    Code       string      `json:"code"`
-    Message    string      `json:"message"`
-    Details    []FieldError `json:"details,omitempty"`
-    StatusCode int         `json:"-"`
-    Err        error       `json:"-"`
-}
-
-var (
-    ErrNotFound     = &AppError{Code: "not_found",     StatusCode: http.StatusNotFound}
-    ErrUnauthorized = &AppError{Code: "unauthorized",  StatusCode: http.StatusUnauthorized}
-    ErrForbidden    = &AppError{Code: "forbidden",     StatusCode: http.StatusForbidden}
-    ErrValidation   = &AppError{Code: "validation_failed", StatusCode: http.StatusBadRequest}
-    ErrInternal     = &AppError{Code: "internal_error",    StatusCode: http.StatusInternalServerError}
-)
-
-// WriteError serializes the error as JSON and sets the correct HTTP status.
-func WriteError(w http.ResponseWriter, err error) { ... }
-```
-
----
-
-## Logging Approach
-
-- **Logger**: `log/slog` with JSON output to `os.Stdout`.
-- **Levels**: Info for normal operations, Warn for non-fatal degradations, Error for failures.
-- **Key-value pairs**: All logs are structured. Keys are lowercase snake_case.
-
-```go
-// internal/logger/logger.go
-func New() *slog.Logger {
-    return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-        Level: slog.LevelInfo,
-    }))
-}
-```
-
-```go
-// Typical usage:
-logger.Info("request",
-    "method", r.Method,
-    "path", r.URL.Path,
-    "duration", time.Since(start).String(),
-    "request_id", RequestIDFromContext(r.Context()),
-)
-```
-
----
-
-## Context Usage
-
-`context.Context` is propagated as the first argument in every function that performs I/O or calls into external systems:
-
-```go
-// internal/mailstore/mailstore.go
-type Store interface {
-    CreateMessage(ctx context.Context, msg *models.Message, labelIDs []uuid.UUID, attachments []*models.Attachment) error
-    GetMessage(ctx context.Context, domainID, userID, messageID uuid.UUID) (*models.Message, error)
-    // ...
-}
-```
-
-Context values are used sparingly for request-scoped metadata (user, domain ID, request ID). Keys are unexported typed strings to avoid collisions:
-
-```go
-// internal/api/middleware.go
-type ctxKey string
-const (
-    ctxKeyUser      ctxKey = "user"
-    ctxKeyDomainID  ctxKey = "domain_id"
-    ctxKeyRequestID ctxKey = "request_id"
-)
-```
-
----
-
-## Configuration Patterns
-
-### Dual-Source Config: TOML + Environment Variables
-
-`internal/config/loader.go` implements a two-layer config system:
-
-1. **TOML file** (`/etc/postnest/postnest.conf`) provides defaults and structured settings.
-2. **Environment variables** (`POSTNEST_<SECTION>_<KEY>`) override TOML values reflectively.
-3. **Legacy env vars** are supported for backward compatibility (e.g., `POSTGRES_DSN` maps to `POSTNEST_DATABASE_DSN`).
-
-```go
-// internal/config/loader.go
-func (l *Loader) Load() (*Config, error) {
-    raw := rawConfig{ /* hard-coded defaults */ }
-
-    if _, err := os.Stat(l.Path); err == nil {
-        if _, err := toml.DecodeFile(l.Path, &raw); err != nil {
-            return nil, fmt.Errorf("failed to decode config file %s: %w", l.Path, err)
-        }
-    }
-
-    applyEnvOverrides(&raw)
-    // ... translate to Config struct and validate
-}
-```
-
-The legacy `internal/config/config.go` also exposes a simpler env-only path with fallback helpers (`getEnv`, `parseInt`, `parseDuration`).
-
----
-
-## Middleware Patterns
-
-HTTP middleware lives in `internal/api/middleware.go` and follows the standard `func(http.Handler) http.Handler` signature, often returning closures when dependencies are needed.
-
-### Available Middleware
-
-| Middleware | Purpose |
-|-----------|---------|
-| `RequestID` | Injects or propagates `X-Request-ID` |
-| `StructuredLogger` | Logs every request with duration, method, path |
-| `Recovery` | Recovers panics and writes JSON 500 |
-| `CORS` | Basic CORS headers; short-circuits `OPTIONS` |
-| `RequireSession` | Validates Bearer token or session cookie via `auth.Service` |
-| `RequireDomainAdmin` | Checks domain admin role; falls back to super-admin |
-
-```go
-// internal/api/middleware.go
-func RequireSession(svc *auth.Service) func(http.Handler) http.Handler {
-    return func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            token := extractToken(r)
-            if token == "" {
-                WriteError(w, ErrUnauthorized)
-                return
-            }
-            // ...
-            next.ServeHTTP(w, r.WithContext(ctx))
-        })
-    }
-}
-```
-
----
-
-## Database Access Patterns
-
-### Connection Pooling
-`internal/db/db.go` wraps `pgxpool.Pool` with a thin struct that validates connectivity on creation:
-
-```go
-// internal/db/db.go
-type Pool struct {
-    *pgxpool.Pool
-}
-
-func New(dsn string, maxConns int) (*Pool, error) {
-    cfg, err := pgxpool.ParseConfig(dsn)
-    if err != nil { return nil, fmt.Errorf("parse postgres dsn: %w", err) }
-    if maxConns > 0 { cfg.MaxConns = int32(maxConns) }
-    pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
-    // ... ping with 5s timeout
-}
-```
-
-### Repository Pattern
-Each domain defines an interface in the root package file and a `PGStore` implementation:
-
-```go
-// internal/mailstore/mailstore.go
-type Store interface { ... }
-
-// internal/mailstore/pgstore.go
-type PGStore struct {
-    pool *pgxpool.Pool
-}
-```
-
-### SQL Style
-- Raw SQL with positional parameters (`$1`, `$2`).
-- Multi-line strings for readability.
-- `COALESCE` used for optional updates in `UPDATE` statements.
-- `ON CONFLICT DO NOTHING` / `ON CONFLICT ... DO UPDATE` for upserts.
-
-### Transactions
-Explicit `Begin`/`Commit`/`Rollback` with `defer tx.Rollback(ctx)`:
-
-```go
-// internal/mailstore/pgstore.go
-func (s *PGStore) CreateMessage(ctx context.Context, msg *models.Message, ...) error {
-    tx, err := s.pool.Begin(ctx)
-    if err != nil { return err }
-    defer tx.Rollback(ctx)
-    // ... inserts ...
-    return tx.Commit(ctx)
-}
-```
-
----
-
-## Consistent Design Patterns
-
-### Constructor / Factory Pattern
-Every major component exposes a constructor that accepts dependencies explicitly:
-
-```go
-// internal/auth/auth.go
-func NewService(pool *pgxpool.Pool, argonTime, argonMemory uint32, argonThreads uint8, sessionKey string) *Service
-
-// internal/redis/redis.go
-func New(redisURL string) (*Client, error)
-
-// internal/workers/workers.go
-func NewPool(r *redis.Client, logger *slog.Logger, concurrency int, pollInterval time.Duration) *Pool
-```
-
-### Interface-Driven Design
-High-level code depends on interfaces, not concrete types:
-
-```go
-// internal/mailstore/mailstore.go
-type Store interface { ... }
-
-// internal/smtp/smtp.go
-type smtpBackend struct {
-    store    mailstore.Store   // interface, not *PGStore
-    auth     *auth.Service
-    postmark *postmark.Client
-}
-```
-
-### Worker Pool with Job Processor Interface
-Background jobs are dispatched via Redis lists and processed by type-registered `Processor` implementations:
-
-```go
-// internal/workers/workers.go
-type Processor interface {
-    Process(ctx context.Context, job *Job) error
-}
-
-func (p *Pool) Register(jobType string, proc Processor) {
-    p.processors[jobType] = proc
-}
-```
-
-### UUID v7 for Primary Keys
-All entities generate IDs with `uuid.Must(uuid.NewV7())` for time-sortable, collision-resistant identifiers.
-
-```go
-// internal/mailstore/pgstore.go
-if msg.ID == uuid.Nil {
-    msg.ID = uuid.Must(uuid.NewV7())
-}
-```
-
-### Embedded Migrations
-Database migrations are embedded using `//go:embed` and driven by `golang-migrate/migrate`:
-
-```go
-// internal/migrate/migrate.go
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
-```
+- Configuration is loaded via `internal/config.Loader` which reads a TOML file and applies `POSTNEST_<SECTION>_<KEY>` environment overrides, with legacy fallback names.
+
+## Error Handling
+
+- The unified application error type is `*AppError` (`internal/api/errors.go`):
+  ```go
+  type AppError struct {
+      Code       string      `json:"code"`
+      Message    string      `json:"message"`
+      Details    []FieldError `json:"details,omitempty"`
+      StatusCode int         `json:"-"`
+      Err        error       `json:"-"`
+  }
+  ```
+- Sentinel errors are pre-declared package variables:
+  ```go
+  var ErrNotFound = &AppError{Code: "not_found", ...}
+  ```
+- Wrapping is done with `fmt.Errorf("...: %w", err)`.
+- `api.As` is a thin wrapper over `errors.As` for unwrapping `*AppError`.
+- Validation failures are built with `NewValidationError([]FieldError{...})`.
+- HTTP responses use `api.WriteError(w, err)`, which falls back to `ErrInternal` if the error is not an `*AppError`.
+
+## Interfaces & Dependency Injection
+
+- Large interfaces are avoided where possible. `mailstore.Store` is the canonical broad interface (≈25 methods), but tests show that callers often depend on narrower interfaces (e.g. `DomainLister` with a single method).
+- Dependency injection is manual: constructors accept concrete or interface types, and wire-up happens in `cmd/server/main.go` and `cmd/worker/main.go`.
+- There is no DI container or code generation for mocks.
+
+## HTTP Layer
+
+- Router: `github.com/go-chi/chi/v5`.
+- Middleware returns `func(http.Handler) http.Handler` or is a method on a struct (`RateLimiter.Handler`).
+- Context values are stored using typed string keys (`type ctxKey string`) to avoid collisions:
+  ```go
+  const ctxKeyUser ctxKey = "user"
+  ```
+- Helpers expose read/write access to context values:
+  ```go
+  func WithUser(ctx context.Context, user *models.User) context.Context
+  func UserFromContext(ctx context.Context) *models.User
+  ```
+- JSON output uses a small helper `writeJSON` (defined in `cmd/server/main.go`) or `api.WriteError`.
+- Status codes are the standard `http.Status*` constants.
+
+## Database Access
+
+- Driver: `github.com/jackc/pgx/v5` via `pgxpool.Pool`.
+- Queries are hand-written SQL with positional parameters (`$1`, `$2`, …).
+- Transactions follow the standard `Begin → defer Rollback → Commit` pattern:
+  ```go
+  tx, err := s.pool.Begin(ctx)
+  if err != nil { return err }
+  defer tx.Rollback(ctx)
+  // ... work ...
+  return tx.Commit(ctx)
+  ```
+- Row scanning is explicit; `pgx.ErrNoRows` is checked for “not found” cases.
+
+## Logging
+
+- `log/slog` is used everywhere.
+- Key-value logging style: `logger.Info("request", "method", r.Method, "path", r.URL.Path, ...)`.
+- Panic recovery logs the stack via `string(debug.Stack())`.
+
+## Configuration
+
+- `internal/config.Loader` reads a TOML file (`/etc/postnest/postnest.conf` by default) into a `rawConfig` struct, then translates it to the flat `Config` struct.
+- Environment overrides are applied reflectively: `POSTNEST_<SECTION>_<KEY>`.
+- Legacy environment variable names are mapped for backward compatibility (e.g. `POSTGRES_DSN` → `POSTNEST_DATABASE_DSN`).
+- Validation is performed after merging; missing required fields produce an aggregated error string.
+
+## Security & Cryptography
+
+- Password hashing uses Argon2id with configurable time, memory, and thread parameters.
+- Session and API tokens are random 32-byte values, base64-encoded for transport, SHA-256 hashed for storage.
+- A constant-time byte comparison helper (`constantTimeCompare`) is used for password verification.
+- Cookies are `HttpOnly`, `Secure` (when TLS is enabled), `SameSite=Lax`, 7-day MaxAge.
+- Rate limiting is a simple in-memory per-IP token bucket protected by `sync.Mutex`.
+
+## Concurrency
+
+- Worker pool (`internal/workers.Pool`) spawns goroutines based on a configurable concurrency level.
+- Graceful shutdown uses `sync.WaitGroup` and context cancellation.
+- Redis-backed queues (`LPush`, `BRPop`, `ZAdd`) are used for job distribution.
+
+## Context
+
+- `context.Context` is always the first parameter in functions that need it.
+- Timeouts are created inline when crossing process boundaries (e.g. `context.WithTimeout(r.Context(), 5*time.Second)`).
+
+## Testing Helpers
+
+- `api.WithUser` is explicitly documented as being used by tests and middleware to inject a user into a context.
+- Handler tests manually construct `chi.RouteContext` and inject it into the request context when URL parameters are required (`webmail_test.go`).
