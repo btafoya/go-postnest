@@ -1,0 +1,186 @@
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-postnest/postnest/internal/api"
+	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/go-postnest/postnest/internal/config"
+	"github.com/go-postnest/postnest/internal/contacts"
+	"github.com/go-postnest/postnest/internal/dav"
+	"github.com/go-postnest/postnest/internal/db"
+	"github.com/go-postnest/postnest/internal/imap"
+	"github.com/go-postnest/postnest/internal/logger"
+	"github.com/go-postnest/postnest/internal/mailstore"
+	"github.com/go-postnest/postnest/internal/postmark"
+	"github.com/go-postnest/postnest/internal/redis"
+	"github.com/go-postnest/postnest/internal/smtp"
+	"github.com/go-postnest/postnest/internal/webhook"
+	"github.com/go-postnest/postnest/internal/webmail"
+)
+
+func main() {
+	log := logger.New()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	pgPool, err := db.New(cfg.PostgresDSN, cfg.MaxDBConns)
+	if err != nil {
+		log.Error("failed to connect to postgres", "error", err)
+		os.Exit(1)
+	}
+	defer pgPool.Close()
+
+	redisClient, err := redis.New(cfg.RedisURL)
+	if err != nil {
+		log.Error("failed to connect to redis", "error", err)
+		os.Exit(1)
+	}
+
+	authService := auth.NewService(pgPool.Pool, cfg.Argon2idTime, cfg.Argon2idMemory, cfg.Argon2idThreads, cfg.SessionKey)
+	mailStore := mailstore.NewPGStore(pgPool.Pool)
+	contactsStore := contacts.NewPGStore(pgPool.Pool)
+	postmarkClient := postmark.NewClient()
+	_ = postmarkClient
+
+	webmailHandler := webmail.NewHandler(mailStore)
+	webhookHandler := webhook.NewHandler(redisClient, cfg.PostmarkWebhookSecret)
+
+	r := chi.NewRouter()
+	// Middleware
+	r.Use(api.RequestID)
+	r.Use(api.StructuredLogger(log))
+	r.Use(api.Recovery)
+	r.Use(api.CORS)
+
+	// Public health
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		status := "ok"
+		httpStatus := http.StatusOK
+
+		// Check database
+		if err := pgPool.Ping(r.Context()); err != nil {
+			status = "degraded"
+			httpStatus = http.StatusServiceUnavailable
+			log.Error("health check: database ping failed", "error", err)
+		}
+
+		// Check redis
+		if err := redisClient.Ping(r.Context()).Err(); err != nil {
+			status = "degraded"
+			httpStatus = http.StatusServiceUnavailable
+			log.Error("health check: redis ping failed", "error", err)
+		}
+
+		writeJSON(w, httpStatus, map[string]string{"status": status})
+	})
+
+	// Webhook routes (public but secret-verified)
+	webhookHandler.RegisterRoutes(r)
+
+	// Authenticated API routes
+	r.Group(func(r chi.Router) {
+		r.Use(api.RequireSession(authService))
+		webmailHandler.RegisterRoutes(r)
+	})
+
+	// Admin API routes
+	r.Group(func(r chi.Router) {
+		r.Use(api.RequireSession(authService))
+		r.Use(api.RequireDomainAdmin(authService))
+		// TODO: admin handlers
+	})
+
+	srv := &http.Server{
+		Addr:         cfg.HTTPAddr,
+		Handler:      r,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+	}
+
+	go func() {
+		log.Info("http server starting", "addr", cfg.HTTPAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("http server error", "error", err)
+		}
+	}()
+
+	// Load TLS config if certificates are provided
+	var tlsConfig *tls.Config
+	if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCertPath, cfg.TLSKeyPath)
+		if err != nil {
+			log.Error("failed to load TLS certificates", "error", err)
+			os.Exit(1)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+		log.Info("TLS configured", "cert", cfg.TLSCertPath)
+	}
+
+	// IMAP server
+	imapSrv := imap.NewServer(cfg.IMAPAddr, tlsConfig, mailStore, authService, redisClient)
+	go func() {
+		log.Info("imap server starting", "addr", cfg.IMAPAddr)
+		if err := imapSrv.Start(); err != nil {
+			log.Error("imap server error", "error", err)
+		}
+	}()
+
+	// SMTP server
+	smtpSrv := smtp.NewServer(cfg.SMTPAddr, tlsConfig, mailStore, authService, postmarkClient)
+	go func() {
+		log.Info("smtp server starting", "addr", cfg.SMTPAddr)
+		if err := smtpSrv.Start(context.Background()); err != nil {
+			log.Error("smtp server error", "error", err)
+		}
+	}()
+
+	// DAV routes
+	davHandler := dav.NewHandler(authService, contactsStore, mailStore)
+	davHandler.RegisterRoutes(r)
+
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Info("shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Shutdown HTTP server
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("http shutdown error", "error", err)
+	}
+
+	// Shutdown IMAP server
+	if err := imapSrv.Stop(); err != nil {
+		log.Error("imap shutdown error", "error", err)
+	}
+
+	// Shutdown SMTP server
+	if err := smtpSrv.Stop(); err != nil {
+		log.Error("smtp shutdown error", "error", err)
+	}
+
+	log.Info("shutdown complete")
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}

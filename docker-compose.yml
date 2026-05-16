@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postnest
+      POSTGRES_PASSWORD: ${POSTNEST_DATABASE_PASSWORD:-changeme}
+      POSTGRES_DB: postnest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postnest -d postnest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      POSTNEST_SERVER_HTTP_ADDR: ":8080"
+      POSTNEST_SERVER_IMAP_ADDR: ":143"
+      POSTNEST_SERVER_SMTP_ADDR: ":587"
+      POSTNEST_DATABASE_DSN: "postgres://postnest:${POSTNEST_DATABASE_PASSWORD:-changeme}@postgres:5432/postnest?sslmode=disable"
+      POSTNEST_REDIS_URL: "redis://redis:6379/0"
+      POSTNEST_SECURITY_SESSION_KEY: ${POSTNEST_SECURITY_SESSION_KEY}
+      POSTNEST_POSTMARK_WEBHOOK_SECRET: ${POSTNEST_POSTMARK_WEBHOOK_SECRET:-}
+      POSTNEST_TLS_CERT_PATH: ${POSTNEST_TLS_CERT_PATH:-}
+      POSTNEST_TLS_KEY_PATH: ${POSTNEST_TLS_KEY_PATH:-}
+    ports:
+      - "8080:8080"
+      - "143:143"
+      - "587:587"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ${POSTNEST_TLS_CERT_PATH:-/dev/null}:/etc/postnest/tls.crt:ro
+      - ${POSTNEST_TLS_KEY_PATH:-/dev/null}:/etc/postnest/tls.key:ro
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      POSTNEST_DATABASE_DSN: "postgres://postnest:${POSTNEST_DATABASE_PASSWORD:-changeme}@postgres:5432/postnest?sslmode=disable"
+      POSTNEST_REDIS_URL: "redis://redis:6379/0"
+      POSTNEST_SECURITY_SESSION_KEY: ${POSTNEST_SECURITY_SESSION_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    environment:
+      POSTNEST_DATABASE_DSN: "postgres://postnest:${POSTNEST_DATABASE_PASSWORD:-changeme}@postgres:5432/postnest?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["up"]
+    restart: "no"
+
+volumes:
+  postgres_data:
+  redis_data:

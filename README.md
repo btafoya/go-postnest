@@ -52,13 +52,12 @@ Postmark API  +  PostgreSQL  +  Redis
 Start PostgreSQL and Redis, then run migrations:
 
 ```bash
-# Using golang-migrate
-migrate -path migrations -database "$POSTGRES_DSN" up
+# Embedded migration runner (no external tool needed)
+export POSTNEST_DATABASE_DSN="postgres://user:pass@localhost:5432/postnest?sslmode=disable"
+go run ./cmd/migrate up
 
-# Or run the SQL files manually
-psql "$POSTGRES_DSN" -f migrations/V1__init.sql
-psql "$POSTGRES_DSN" -f migrations/V2__fts.sql
-psql "$POSTGRES_DSN" -f migrations/V3__seed_labels.sql
+# Or use the pre-built binary
+postnest-migrate up
 ```
 
 ### Running the Server
@@ -66,10 +65,14 @@ psql "$POSTGRES_DSN" -f migrations/V3__seed_labels.sql
 The server exposes HTTP (REST + webhooks), IMAP, SMTP, and DAV:
 
 ```bash
-export POSTGRES_DSN="postgres://user:pass@localhost:5432/postnest?sslmode=disable"
-export REDIS_URL="redis://localhost:6379/0"
-export SESSION_KEY="change-me-in-production"
-export POSTMARK_WEBHOOK_SECRET="your-postmark-secret"
+# Using a config file (recommended for production)
+export POSTNEST_CONFIG_PATH="/etc/postnest/postnest.conf"
+
+# Or set environment variables directly
+export POSTNEST_DATABASE_DSN="postgres://user:pass@localhost:5432/postnest?sslmode=disable"
+export POSTNEST_REDIS_URL="redis://localhost:6379/0"
+export POSTNEST_SECURITY_SESSION_KEY="change-me-in-production"
+export POSTNEST_POSTMARK_WEBHOOK_SECRET="your-postmark-secret"
 
 go run ./cmd/server
 ```
@@ -79,9 +82,11 @@ go run ./cmd/server
 Workers process background jobs from Redis:
 
 ```bash
-export POSTGRES_DSN="postgres://user:pass@localhost:5432/postnest?sslmode=disable"
-export REDIS_URL="redis://localhost:6379/0"
-export SESSION_KEY="change-me-in-production"
+export POSTNEST_CONFIG_PATH="/etc/postnest/postnest.conf"
+# Or set environment variables directly
+export POSTNEST_DATABASE_DSN="postgres://user:pass@localhost:5432/postnest?sslmode=disable"
+export POSTNEST_REDIS_URL="redis://localhost:6379/0"
+export POSTNEST_SECURITY_SESSION_KEY="change-me-in-production"
 
 go run ./cmd/worker
 ```
@@ -98,26 +103,54 @@ go run ./cmd/server
 
 ## Configuration
 
-All configuration is environment-driven. Key variables:
+PostNest uses a TOML configuration file with environment variable overrides.
+
+### Config File
+
+Place a file at `/etc/postnest/postnest.conf` (or set `POSTNEST_CONFIG_PATH`):
+
+```toml
+config_version = 1
+
+[server]
+http_addr = ":8080"
+imap_addr = ":143"
+smtp_addr  = ":587"
+
+[database]
+dsn = "postgres://user:pass@localhost:5432/postnest?sslmode=disable"
+
+[redis]
+url = "redis://localhost:6379/0"
+
+[security]
+session_key = "change-me-in-production"
+```
+
+Generate a full template with: `postnest-server --print-config-template`
+
+### Environment Variables
+
+All TOML values can be overridden via environment variables using the pattern `POSTNEST_<SECTION>_<KEY>`.
+Legacy variable names (e.g., `POSTGRES_DSN`, `SESSION_KEY`) are also supported for backward compatibility.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HTTP_ADDR` | `:8080` | HTTP REST API address |
-| `IMAP_ADDR` | `:143` | IMAP server address |
-| `SMTP_ADDR` | `:587` | SMTP submission address |
-| `POSTGRES_DSN` | — | PostgreSQL connection string |
-| `POSTGRES_READ_DSN` | — | Optional read-replica DSN |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
-| `SESSION_KEY` | — | Secret key for session signing |
-| `SESSION_EXPIRY` | `168h` | Session duration |
-| `POSTMARK_WEBHOOK_SECRET` | — | Postmark webhook signature secret |
-| `WORKER_CONCURRENCY` | `10` | Number of concurrent worker goroutines |
-| `WORKER_POLL_INTERVAL` | `5s` | Redis job polling interval |
-| `MAX_MESSAGE_SIZE` | `52428800` (50MB) | Maximum incoming message size |
-| `MAX_ATTACHMENT_SIZE` | `26214400` (25MB) | Maximum attachment size |
-| `TLS_CERT_PATH` | — | Path to TLS certificate |
-| `TLS_KEY_PATH` | — | Path to TLS private key |
-
+| `POSTNEST_SERVER_HTTP_ADDR` | `:8080` | HTTP REST API address |
+| `POSTNEST_SERVER_IMAP_ADDR` | `:143` | IMAP server address |
+| `POSTNEST_SERVER_SMTP_ADDR` | `:587` | SMTP submission address |
+| `POSTNEST_DATABASE_DSN` | — | PostgreSQL connection string |
+| `POSTNEST_DATABASE_READ_DSN` | — | Optional read-replica DSN |
+| `POSTNEST_REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
+| `POSTNEST_SECURITY_SESSION_KEY` | — | Secret key for session signing |
+| `POSTNEST_SECURITY_SESSION_EXPIRY` | `168h` | Session duration |
+| `POSTNEST_POSTMARK_WEBHOOK_SECRET` | — | Postmark webhook signature secret |
+| `POSTNEST_WORKER_CONCURRENCY` | `10` | Number of concurrent worker goroutines |
+| `POSTNEST_WORKER_POLL_INTERVAL` | `5s` | Redis job polling interval |
+| `POSTNEST_SECURITY_MAX_MESSAGE_SIZE` | `52428800` (50MB) | Maximum incoming message size |
+| `POSTNEST_SECURITY_MAX_ATTACHMENT_SIZE` | `26214400` (25MB) | Maximum attachment size |
+| `POSTNEST_TLS_CERT_PATH` | — | Path to TLS certificate |
+| `POSTNEST_TLS_KEY_PATH` | — | Path to TLS private key |
 ## API
 
 PostNest provides a Gmail-style REST API for webmail clients:
@@ -152,26 +185,63 @@ Additional workers (reputation updater, spam evaluator, search indexer, mailbox 
 
 ## Deployment
 
-PostNest supports containerized and native deployments:
+PostNest supports three deployment modes:
 
-- **Docker / Docker Compose** — See [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) §8 for service topology.
-- **Nix** — Flake and `nixosModules` are planned.
-- **Systemd** — Service integration via `kardianos/service` is planned.
+### System Service (systemd)
 
-Services required:
+Run as native systemd services on a modern Linux host with pre-installed PostgreSQL and Redis:
 
-- `app` — HTTP + IMAP + SMTP + DAV
-- `worker` — Background job processors
-- `postgres` — Primary datastore
-- `redis` — Job queue + IMAP IDLE pub/sub
+```bash
+sudo ./scripts/install-systemd.sh
+postnest-migrate up
+sudo systemctl start postnest-server postnest-worker
+```
 
+### Docker Compose
+
+Run as a containerized stack with PostgreSQL and Redis sidecars:
+
+```bash
+cp .env.example .env
+# Edit .env, then:
+./scripts/install-docker.sh
+```
+
+### Nix Flake
+
+**NixOS module** (declarative):
+```nix
+{ pkgs, ... }:
+{
+  imports = [ inputs.postnest.nixosModules.postnest ];
+  services.postnest = {
+    enable = true;
+    database.passwordFile = /run/secrets/postnest-db-password;
+  };
+}
+```
+
+**Generic Nix** (non-NixOS):
+```bash
+nix develop   # dev shell with Go, Postgres, Redis
+nix run .#postnest-server
+```
+
+Services required in all modes:
+
+| Service | Purpose |
+|---|---|
+| `postnest-server` | HTTP + IMAP + SMTP + DAV |
+| `postnest-worker` | Background job processors |
+| `postgres` | Primary datastore |
+| `redis` | Job queue + IMAP IDLE pub/sub |
 ## Project Structure
 
 ```
 cmd/
   server/          # HTTP, IMAP, SMTP, DAV server entrypoint
   worker/          # Background worker pool entrypoint
-
+  migrate/         # Database migration CLI (embedded migrations)
 internal/
   api/             # Shared middleware (auth, CORS, JSON, rate limit, errors)
   auth/            # Argon2id hashing, session & API-key management
@@ -182,6 +252,7 @@ internal/
   imap/            # IMAP4rev1 server implementation
   logger/          # Structured JSON logging (slog)
   mailstore/       # Canonical mail storage abstraction + PostgreSQL implementation
+  migrate/         # Embedded migration runner (golang-migrate)
   models/          # Pure data structures (Message, User, Label, Thread, etc.)
   postmark/        # Postmark HTTP client + webhook parser
   redis/           # Redis client with enqueue/dequeue helpers
@@ -192,8 +263,8 @@ internal/
   webhook/         # Postmark webhook receiver (inbound, bounce, delivery, spam)
   workers/         # Redis-backed worker pool with retry logic
 
-migrations/        # Flyway-style SQL migrations (V1, V2, V3)
-design/            # Architecture & design documents
+scripts/            # Installation scripts for systemd and Docker
+nix/               # Nix flake and NixOS module
 ```
 
 ## Design Documentation
@@ -205,6 +276,8 @@ PostNest was designed with comprehensive architecture documents:
 - [`design/DATABASE-SCHEMA.md`](design/DATABASE-SCHEMA.md) — PostgreSQL schema, indexes, FTS design
 - [`design/PROTOCOL-DESIGN.md`](design/PROTOCOL-DESIGN.md) — IMAP, SMTP, DAV protocol details
 - [`design/COMPONENT-DESIGN.md`](design/COMPONENT-DESIGN.md) — Package layout, interfaces, implementation order
+- [`design/DEPLOYMENT-ARCHITECTURE.md`](design/DEPLOYMENT-ARCHITECTURE.md) — Systemd, Docker, and Nix deployment specs
+- [`design/REQUIREMENTS-DEPLOYMENT.md`](design/REQUIREMENTS-DEPLOYMENT.md) — Deployment requirements and acceptance criteria
 - [`INTEGRATION.md`](INTEGRATION.md) — Current implementation status and known limitations
 
 ## Contributing
