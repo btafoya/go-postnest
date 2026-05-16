@@ -21,6 +21,16 @@ type Config struct {
 	TLSCertPath string `env:"TLS_CERT_PATH"`
 	TLSKeyPath  string `env:"TLS_KEY_PATH"`
 
+	// ACME
+	ACMEEnabled       bool          `env:"ACME_ENABLED"`
+	ACMEEmail         string        `env:"ACME_EMAIL"`
+	ACMEDomain        string        `env:"ACME_DOMAIN"`
+	ACMEDirectory     string        `env:"ACME_DIRECTORY"`
+	ACMECertDir       string        `env:"ACME_CERT_DIR"`
+	ACMEDNSProvider   string        `env:"ACME_DNS_PROVIDER"`
+	ACMERenewInterval time.Duration `env:"ACME_RENEW_INTERVAL"`
+	ACMERenewBefore   time.Duration `env:"ACME_RENEW_BEFORE"`
+
 	// Database
 	PostgresDSN     string `env:"POSTGRES_DSN"`
 	PostgresReadDSN string `env:"POSTGRES_READ_DSN"`

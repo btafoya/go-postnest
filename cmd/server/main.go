@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/go-postnest/postnest/internal/certmanager"
 	"github.com/go-postnest/postnest/internal/config"
 	"github.com/go-postnest/postnest/internal/contacts"
 	"github.com/go-postnest/postnest/internal/dav"
@@ -116,9 +117,45 @@ func main() {
 		}
 	}()
 
-	// Load TLS config if certificates are provided
-	var tlsConfig *tls.Config
-	if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+	// Determine TLS strategy and listener configuration.
+	var (
+		tlsConfig         *tls.Config
+		allowInsecureAuth bool
+		imapAddr          string
+		smtpAddr          string
+		certMgr           *certmanager.Manager
+	)
+
+	switch {
+	case cfg.ACMEEnabled:
+		cmCfg := certmanager.Config{
+			Email:         cfg.ACMEEmail,
+			Domain:        cfg.ACMEDomain,
+			Directory:     cfg.ACMEDirectory,
+			CertDir:       cfg.ACMECertDir,
+			DNSProvider:   cfg.ACMEDNSProvider,
+			RenewInterval: cfg.ACMERenewInterval,
+			RenewBefore:   cfg.ACMERenewBefore,
+		}
+		certMgr, err = certmanager.NewManager(cmCfg, log)
+		if err != nil {
+			log.Error("failed to create certificate manager", "error", err)
+			os.Exit(1)
+		}
+		if err := certMgr.Start(context.Background()); err != nil {
+			log.Error("failed to start certificate manager", "error", err)
+			os.Exit(1)
+		}
+
+		tlsConfig = &tls.Config{
+			GetCertificate: certMgr.GetCertificate,
+		}
+		allowInsecureAuth = false
+		imapAddr = cfg.IMAPSAddr
+		smtpAddr = cfg.SMTPSAddr
+		log.Info("ACME TLS configured", "domain", cfg.ACMEDomain, "directory", cfg.ACMEDirectory)
+
+	case cfg.TLSCertPath != "" && cfg.TLSKeyPath != "":
 		cert, err := tls.LoadX509KeyPair(cfg.TLSCertPath, cfg.TLSKeyPath)
 		if err != nil {
 			log.Error("failed to load TLS certificates", "error", err)
@@ -127,22 +164,31 @@ func main() {
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-		log.Info("TLS configured", "cert", cfg.TLSCertPath)
+		allowInsecureAuth = false
+		imapAddr = cfg.IMAPSAddr
+		smtpAddr = cfg.SMTPSAddr
+		log.Info("static TLS configured", "cert", cfg.TLSCertPath)
+
+	default:
+		allowInsecureAuth = true
+		imapAddr = cfg.IMAPAddr
+		smtpAddr = cfg.SMTPAddr
+		log.Info("running without TLS", "imap", imapAddr, "smtp", smtpAddr)
 	}
 
 	// IMAP server
-	imapSrv := imap.NewServer(cfg.IMAPAddr, tlsConfig, mailStore, authService, redisClient)
+	imapSrv := imap.NewServer(imapAddr, tlsConfig, allowInsecureAuth, mailStore, authService, redisClient)
 	go func() {
-		log.Info("imap server starting", "addr", cfg.IMAPAddr)
+		log.Info("imap server starting", "addr", imapAddr, "tls", tlsConfig != nil)
 		if err := imapSrv.Start(); err != nil {
 			log.Error("imap server error", "error", err)
 		}
 	}()
 
 	// SMTP server
-	smtpSrv := smtp.NewServer(cfg.SMTPAddr, tlsConfig, mailStore, authService, postmarkClient)
+	smtpSrv := smtp.NewServer(smtpAddr, tlsConfig, allowInsecureAuth, mailStore, authService, postmarkClient)
 	go func() {
-		log.Info("smtp server starting", "addr", cfg.SMTPAddr)
+		log.Info("smtp server starting", "addr", smtpAddr, "tls", tlsConfig != nil)
 		if err := smtpSrv.Start(context.Background()); err != nil {
 			log.Error("smtp server error", "error", err)
 		}
@@ -174,6 +220,13 @@ func main() {
 	// Shutdown SMTP server
 	if err := smtpSrv.Stop(); err != nil {
 		log.Error("smtp shutdown error", "error", err)
+	}
+
+	// Shutdown certificate manager
+	if certMgr != nil {
+		if err := certMgr.Stop(); err != nil {
+			log.Error("certificate manager shutdown error", "error", err)
+		}
 	}
 
 	log.Info("shutdown complete")

@@ -15,16 +15,16 @@ const defaultConfigPath = "/etc/postnest/postnest.conf"
 
 // rawConfig mirrors the TOML file shape.
 type rawConfig struct {
-	ConfigVersion int              `toml:"config_version"`
-	Server        rawServer        `toml:"server"`
-	Database      rawDatabase      `toml:"database"`
-	Redis         rawRedis         `toml:"redis"`
-	Postmark      rawPostmark      `toml:"postmark"`
-	TLS           rawTLS           `toml:"tls"`
-	Worker        rawWorker        `toml:"worker"`
-	Security      rawSecurity      `toml:"security"`
+	ConfigVersion int         `toml:"config_version"`
+	Server        rawServer   `toml:"server"`
+	Database      rawDatabase `toml:"database"`
+	Redis         rawRedis    `toml:"redis"`
+	Postmark      rawPostmark `toml:"postmark"`
+	TLS           rawTLS      `toml:"tls"`
+	Worker        rawWorker   `toml:"worker"`
+	Security      rawSecurity `toml:"security"`
+	ACME          rawACME     `toml:"acme"`
 }
-
 type rawServer struct {
 	HTTPAddr     string        `toml:"http_addr"`
 	IMAPAddr     string        `toml:"imap_addr"`
@@ -55,18 +55,29 @@ type rawTLS struct {
 }
 
 type rawWorker struct {
-	Concurrency   int           `toml:"concurrency"`
-	PollInterval  time.Duration `toml:"poll_interval"`
+	Concurrency  int           `toml:"concurrency"`
+	PollInterval time.Duration `toml:"poll_interval"`
 }
 
 type rawSecurity struct {
-	SessionKey         string        `toml:"session_key"`
-	SessionExpiry      time.Duration `toml:"session_expiry"`
-	Argon2idTime       uint32        `toml:"argon2id_time"`
-	Argon2idMemory     uint32        `toml:"argon2id_memory"`
-	Argon2idThreads    uint8         `toml:"argon2id_threads"`
-	MaxMessageSize     int64         `toml:"max_message_size"`
-	MaxAttachmentSize  int64         `toml:"max_attachment_size"`
+	SessionKey        string        `toml:"session_key"`
+	SessionExpiry     time.Duration `toml:"session_expiry"`
+	Argon2idTime      uint32        `toml:"argon2id_time"`
+	Argon2idMemory    uint32        `toml:"argon2id_memory"`
+	Argon2idThreads   uint8         `toml:"argon2id_threads"`
+	MaxMessageSize    int64         `toml:"max_message_size"`
+	MaxAttachmentSize int64         `toml:"max_attachment_size"`
+}
+
+type rawACME struct {
+	Enabled       bool          `toml:"enabled"`
+	Email         string        `toml:"email"`
+	Domain        string        `toml:"domain"`
+	Directory     string        `toml:"directory"`
+	CertDir       string        `toml:"cert_dir"`
+	DNSProvider   string        `toml:"dns_provider"`
+	RenewInterval time.Duration `toml:"renew_interval"`
+	RenewBefore   time.Duration `toml:"renew_before"`
 }
 
 // Loader reads TOML configuration and applies environment variable overrides.
@@ -118,6 +129,13 @@ func (l *Loader) Load() (*Config, error) {
 			MaxMessageSize:    52428800,
 			MaxAttachmentSize: 26214400,
 		},
+		ACME: rawACME{
+			Directory:     "staging",
+			CertDir:       "/var/lib/postnest/certs",
+			DNSProvider:   "cloudflare",
+			RenewInterval: 24 * time.Hour,
+			RenewBefore:   720 * time.Hour,
+		},
 	}
 
 	// Load file if it exists.
@@ -132,29 +150,37 @@ func (l *Loader) Load() (*Config, error) {
 
 	// Translate to the existing Config struct.
 	cfg := &Config{
-		HTTPAddr:     raw.Server.HTTPAddr,
-		IMAPAddr:     raw.Server.IMAPAddr,
-		IMAPSAddr:    raw.Server.IMAPSAddr,
-		SMTPAddr:     raw.Server.SMTPAddr,
-		SMTPSAddr:    raw.Server.SMTPSAddr,
-		ReadTimeout:  raw.Server.ReadTimeout,
-		WriteTimeout: raw.Server.WriteTimeout,
-		TLSCertPath:  raw.TLS.CertPath,
-		TLSKeyPath:   raw.TLS.KeyPath,
-		PostgresDSN:  raw.Database.DSN,
-		PostgresReadDSN: raw.Database.ReadDSN,
-		MaxDBConns:   raw.Database.MaxConns,
-		RedisURL:     raw.Redis.URL,
-		Argon2idTime: raw.Security.Argon2idTime,
-		Argon2idMemory: raw.Security.Argon2idMemory,
-		Argon2idThreads: raw.Security.Argon2idThreads,
-		SessionKey:   raw.Security.SessionKey,
-		SessionExpiry: raw.Security.SessionExpiry,
+		HTTPAddr:              raw.Server.HTTPAddr,
+		IMAPAddr:              raw.Server.IMAPAddr,
+		IMAPSAddr:             raw.Server.IMAPSAddr,
+		SMTPAddr:              raw.Server.SMTPAddr,
+		SMTPSAddr:             raw.Server.SMTPSAddr,
+		ReadTimeout:           raw.Server.ReadTimeout,
+		WriteTimeout:          raw.Server.WriteTimeout,
+		TLSCertPath:           raw.TLS.CertPath,
+		TLSKeyPath:            raw.TLS.KeyPath,
+		PostgresDSN:           raw.Database.DSN,
+		PostgresReadDSN:       raw.Database.ReadDSN,
+		MaxDBConns:            raw.Database.MaxConns,
+		RedisURL:              raw.Redis.URL,
+		Argon2idTime:          raw.Security.Argon2idTime,
+		Argon2idMemory:        raw.Security.Argon2idMemory,
+		Argon2idThreads:       raw.Security.Argon2idThreads,
+		SessionKey:            raw.Security.SessionKey,
+		SessionExpiry:         raw.Security.SessionExpiry,
 		PostmarkWebhookSecret: raw.Postmark.WebhookSecret,
-		WorkerConcurrency: raw.Worker.Concurrency,
-		WorkerPollInterval: raw.Worker.PollInterval,
-		MaxMessageSize: raw.Security.MaxMessageSize,
-		MaxAttachmentSize: raw.Security.MaxAttachmentSize,
+		WorkerConcurrency:     raw.Worker.Concurrency,
+		WorkerPollInterval:    raw.Worker.PollInterval,
+		MaxMessageSize:        raw.Security.MaxMessageSize,
+		MaxAttachmentSize:     raw.Security.MaxAttachmentSize,
+		ACMEEnabled:           raw.ACME.Enabled,
+		ACMEEmail:             raw.ACME.Email,
+		ACMEDomain:            raw.ACME.Domain,
+		ACMEDirectory:         raw.ACME.Directory,
+		ACMECertDir:           raw.ACME.CertDir,
+		ACMEDNSProvider:       raw.ACME.DNSProvider,
+		ACMERenewInterval:     raw.ACME.RenewInterval,
+		ACMERenewBefore:       raw.ACME.RenewBefore,
 	}
 
 	// Validation.
@@ -239,27 +265,27 @@ func applySectionOverrides(v reflect.Value, prefix string) {
 // compatibility for existing deployments.
 func legacyEnv(newKey string) string {
 	legacy := map[string]string{
-		"POSTNEST_SERVER_HTTP_ADDR":        "HTTP_ADDR",
-		"POSTNEST_SERVER_IMAP_ADDR":          "IMAP_ADDR",
-		"POSTNEST_SERVER_IMAPS_ADDR":         "IMAPS_ADDR",
-		"POSTNEST_SERVER_SMTP_ADDR":          "SMTP_ADDR",
-		"POSTNEST_SERVER_SMTPS_ADDR":         "SMTPS_ADDR",
-		"POSTNEST_SERVER_READ_TIMEOUT":       "READ_TIMEOUT",
-		"POSTNEST_SERVER_WRITE_TIMEOUT":      "WRITE_TIMEOUT",
-		"POSTNEST_TLS_CERT_PATH":             "TLS_CERT_PATH",
-		"POSTNEST_TLS_KEY_PATH":              "TLS_KEY_PATH",
-		"POSTNEST_DATABASE_DSN":              "POSTGRES_DSN",
-		"POSTNEST_DATABASE_READ_DSN":         "POSTGRES_READ_DSN",
-		"POSTNEST_DATABASE_MAX_CONNS":        "MAX_DB_CONNS",
-		"POSTNEST_REDIS_URL":                 "REDIS_URL",
-		"POSTNEST_SECURITY_ARGON2ID_TIME":    "ARGON2ID_TIME",
-		"POSTNEST_SECURITY_ARGON2ID_MEMORY":  "ARGON2ID_MEMORY",
-		"POSTNEST_SECURITY_ARGON2ID_THREADS": "ARGON2ID_THREADS",
-		"POSTNEST_SECURITY_SESSION_KEY":      "SESSION_KEY",
-		"POSTNEST_SECURITY_SESSION_EXPIRY":   "SESSION_EXPIRY",
-		"POSTNEST_POSTMARK_WEBHOOK_SECRET":   "POSTMARK_WEBHOOK_SECRET",
-		"POSTNEST_WORKER_CONCURRENCY":        "WORKER_CONCURRENCY",
-		"POSTNEST_WORKER_POLL_INTERVAL":      "WORKER_POLL_INTERVAL",
+		"POSTNEST_SERVER_HTTP_ADDR":             "HTTP_ADDR",
+		"POSTNEST_SERVER_IMAP_ADDR":             "IMAP_ADDR",
+		"POSTNEST_SERVER_IMAPS_ADDR":            "IMAPS_ADDR",
+		"POSTNEST_SERVER_SMTP_ADDR":             "SMTP_ADDR",
+		"POSTNEST_SERVER_SMTPS_ADDR":            "SMTPS_ADDR",
+		"POSTNEST_SERVER_READ_TIMEOUT":          "READ_TIMEOUT",
+		"POSTNEST_SERVER_WRITE_TIMEOUT":         "WRITE_TIMEOUT",
+		"POSTNEST_TLS_CERT_PATH":                "TLS_CERT_PATH",
+		"POSTNEST_TLS_KEY_PATH":                 "TLS_KEY_PATH",
+		"POSTNEST_DATABASE_DSN":                 "POSTGRES_DSN",
+		"POSTNEST_DATABASE_READ_DSN":            "POSTGRES_READ_DSN",
+		"POSTNEST_DATABASE_MAX_CONNS":           "MAX_DB_CONNS",
+		"POSTNEST_REDIS_URL":                    "REDIS_URL",
+		"POSTNEST_SECURITY_ARGON2ID_TIME":       "ARGON2ID_TIME",
+		"POSTNEST_SECURITY_ARGON2ID_MEMORY":     "ARGON2ID_MEMORY",
+		"POSTNEST_SECURITY_ARGON2ID_THREADS":    "ARGON2ID_THREADS",
+		"POSTNEST_SECURITY_SESSION_KEY":         "SESSION_KEY",
+		"POSTNEST_SECURITY_SESSION_EXPIRY":      "SESSION_EXPIRY",
+		"POSTNEST_POSTMARK_WEBHOOK_SECRET":      "POSTMARK_WEBHOOK_SECRET",
+		"POSTNEST_WORKER_CONCURRENCY":           "WORKER_CONCURRENCY",
+		"POSTNEST_WORKER_POLL_INTERVAL":         "WORKER_POLL_INTERVAL",
 		"POSTNEST_SECURITY_MAX_MESSAGE_SIZE":    "MAX_MESSAGE_SIZE",
 		"POSTNEST_SECURITY_MAX_ATTACHMENT_SIZE": "MAX_ATTACHMENT_SIZE",
 	}

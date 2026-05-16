@@ -19,11 +19,11 @@ type Server struct {
 }
 
 // NewServer creates an IMAP server.
-func NewServer(addr string, tlsCfg *tls.Config, store mailstore.Store, auth *auth.Service, redis *redis.Client) *Server {
+func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store mailstore.Store, auth *auth.Service, redis *redis.Client) *Server {
 	be := &imapBackend{store: store, auth: auth, redis: redis}
 	s := imapserver.New(be)
 	s.Addr = addr
-	s.AllowInsecureAuth = true
+	s.AllowInsecureAuth = allowInsecureAuth
 	if tlsCfg != nil {
 		s.TLSConfig = tlsCfg
 	}

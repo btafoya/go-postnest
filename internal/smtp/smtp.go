@@ -27,11 +27,11 @@ type Server struct {
 }
 
 // NewServer creates an SMTP server.
-func NewServer(addr string, tlsCfg *tls.Config, store mailstore.Store, auth *auth.Service, pm *postmark.Client) *Server {
+func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store mailstore.Store, auth *auth.Service, pm *postmark.Client) *Server {
 	be := &smtpBackend{store: store, auth: auth, postmark: pm}
 	s := smtp.NewServer(be)
 	s.Addr = addr
-	s.AllowInsecureAuth = true
+	s.AllowInsecureAuth = allowInsecureAuth
 	if tlsCfg != nil {
 		s.TLSConfig = tlsCfg
 	}
