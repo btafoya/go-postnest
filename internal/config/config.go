@@ -16,6 +16,7 @@ type Config struct {
 	SMTPSAddr    string        `env:"SMTPS_ADDR" envDefault:":465"`
 	ReadTimeout  time.Duration `env:"READ_TIMEOUT" envDefault:"30s"`
 	WriteTimeout time.Duration `env:"WRITE_TIMEOUT" envDefault:"30s"`
+	AllowedOrigins []string
 
 	// TLS
 	TLSCertPath string `env:"TLS_CERT_PATH"`

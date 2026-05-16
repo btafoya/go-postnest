@@ -1,14 +1,14 @@
 package api
 
-
-
 import (
 	"context"
+	"sync"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -61,6 +61,7 @@ func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				slog.Error("panic recovered", "error", rec, "stack", string(debug.Stack()))
 				WriteError(w, fmt.Errorf("panic: %v", rec))
 			}
 		}()
@@ -68,17 +69,43 @@ func Recovery(next http.Handler) http.Handler {
 	})
 }
 
-// CORS adds basic CORS headers.
-func CORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Domain-ID")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
+// CORS adds CORS headers restricted to configured origins.
+func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			allowed := false
+			for _, o := range allowedOrigins {
+				if o == origin {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Domain-ID")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// SetSessionCookie writes a secure session cookie.
+func SetSessionCookie(w http.ResponseWriter, token string, secure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400 * 7,
 	})
 }
 
@@ -155,6 +182,54 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
+// RateLimiter is a simple per-IP token-bucket rate limiter.
+type RateLimiter struct {
+	requests int
+	window  time.Duration
+	clients map[string][]time.Time
+	mu      sync.Mutex
+}
+
+// NewRateLimiter creates a rate limiter allowing `requests` per `window`.
+func NewRateLimiter(requests int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
+		requests: requests,
+		window:   window,
+		clients:  make(map[string][]time.Time),
+	}
+}
+
+// Handler returns the middleware function.
+func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := r.RemoteAddr
+		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+			ip = strings.Split(xf, ",")[0]
+		}
+		now := time.Now()
+		rl.mu.Lock()
+		var times []time.Time
+		for _, t := range rl.clients[ip] {
+			if now.Sub(t) < rl.window {
+				times = append(times, t)
+			}
+		}
+		if len(times) >= rl.requests {
+			rl.mu.Unlock()
+			WriteError(w, ErrRateLimited)
+			return
+		}
+		rl.clients[ip] = append(times, now)
+		rl.mu.Unlock()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// WithUser returns a context with the user set. Used by tests and middleware.
+func WithUser(ctx context.Context, user *models.User) context.Context {
+	return context.WithValue(ctx, ctxKeyUser, user)
+}
+
 // UserFromContext returns the authenticated user.
 func UserFromContext(ctx context.Context) *models.User {
 	if u, ok := ctx.Value(ctxKeyUser).(*models.User); ok {
@@ -179,7 +254,6 @@ func RequestIDFromContext(ctx context.Context) string {
 	}
 	return ""
 }
-
 
 // ParseUUID parses a UUID string into uuid.UUID.
 func ParseUUID(s string) (uuid.UUID, error) {

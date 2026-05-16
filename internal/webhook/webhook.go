@@ -3,7 +3,6 @@ package webhook
 import (
 	"encoding/json"
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/redis"
 	"github.com/go-postnest/postnest/internal/workers"
+	"github.com/google/uuid"
 )
 
 // Handler receives Postmark webhooks.
@@ -41,6 +41,10 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+	if !h.dedup(r.Context(), payload) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := h.enqueue(r.Context(), "inbound", payload); err != nil {
 		api.WriteError(w, api.ErrInternal)
 		return
@@ -56,6 +60,10 @@ func (h *Handler) handleBounce(w http.ResponseWriter, r *http.Request) {
 	var payload map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if !h.dedup(r.Context(), payload) {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if err := h.enqueue(r.Context(), "bounce", payload); err != nil {
@@ -75,6 +83,10 @@ func (h *Handler) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+	if !h.dedup(r.Context(), payload) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := h.enqueue(r.Context(), "delivery", payload); err != nil {
 		api.WriteError(w, api.ErrInternal)
 		return
@@ -92,6 +104,10 @@ func (h *Handler) handleSpam(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+	if !h.dedup(r.Context(), payload) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := h.enqueue(r.Context(), "spam", payload); err != nil {
 		api.WriteError(w, api.ErrInternal)
 		return
@@ -103,7 +119,20 @@ func (h *Handler) verify(r *http.Request) bool {
 	// In production, verify Postmark signature or compare a shared secret.
 	// For now accept all valid JSON POSTs with a basic secret check.
 	token := r.Header.Get("X-Postmark-Server-Token")
-	return token == h.secret || h.secret == ""
+	return token != "" && token == h.secret
+}
+
+func (h *Handler) dedup(ctx context.Context, payload map[string]any) bool {
+	msgID, _ := payload["MessageID"].(string)
+	if msgID == "" {
+		return true
+	}
+	key := "webhook:" + msgID
+	ok, err := h.redis.SetNX(ctx, key, "1", 5*time.Minute).Result()
+	if err != nil {
+		return true // fail open: process on Redis error
+	}
+	return ok
 }
 
 func (h *Handler) enqueue(ctx context.Context, jobType string, payload map[string]any) error {
@@ -112,11 +141,12 @@ func (h *Handler) enqueue(ctx context.Context, jobType string, payload map[strin
 		return err
 	}
 	job := workers.Job{
-		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:          uuid.Must(uuid.NewV7()).String(),
 		Type:        jobType,
 		Payload:     pb,
 		MaxAttempts: 3,
 		CreatedAt:   time.Now().Unix(),
+		ScheduledAt: time.Now().Unix(),
 	}
 	jb, err := json.Marshal(job)
 	if err != nil {

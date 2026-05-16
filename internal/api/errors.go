@@ -1,9 +1,8 @@
 package api
 
-
-
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 )
 
@@ -54,13 +53,5 @@ func WriteError(w http.ResponseWriter, err error) {
 
 // As is a wrapper around errors.As.
 func As(err error, target any) bool {
-	// We use a simplified check: if err is *AppError, set it.
-	if e, ok := err.(*AppError); ok {
-		switch t := target.(type) {
-		case **AppError:
-			*t = e
-			return true
-		}
-	}
-	return false
+	return errors.As(err, target)
 }

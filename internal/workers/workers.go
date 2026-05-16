@@ -1,33 +1,50 @@
 package workers
 
-
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/go-postnest/postnest/internal/redis"
+	"github.com/google/uuid"
+)
+
+const (
+	queueJobs       = "queue:jobs"
+	queueDelayed    = "queue:jobs:delayed"
+	queueDead       = "queue:jobs:dead"
 )
 
 // Job represents a queued background job.
 type Job struct {
-	ID       string          `json:"id"`
-	Type     string          `json:"type"`
-	Payload  json.RawMessage `json:"payload"`
-	Attempts int             `json:"attempts"`
-	MaxAttempts int          `json:"max_attempts"`
-	CreatedAt int64          `json:"created_at"`
+	ID          string          `json:"id"`
+	Type        string          `json:"type"`
+	Payload     json.RawMessage `json:"payload"`
+	Attempts    int             `json:"attempts"`
+	MaxAttempts int             `json:"max_attempts"`
+	CreatedAt   int64           `json:"created_at"`
+	ScheduledAt int64           `json:"scheduled_at"`
 }
 
 // Pool is a worker pool that consumes jobs from Redis.
 type Pool struct {
-	redis       *redis.Client
-	logger      *slog.Logger
-	concurrency int
+	redis        *redis.Client
+	logger       *slog.Logger
+	concurrency  int
 	pollInterval time.Duration
-	processors  map[string]Processor
+	processors   map[string]Processor
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	nowFunc      func() time.Time
+}
+
+func (p *Pool) now() time.Time {
+	if p.nowFunc != nil {
+		return p.nowFunc()
+	}
+	return time.Now()
 }
 
 // Processor handles a specific job type.
@@ -53,8 +70,32 @@ func (p *Pool) Register(jobType string, proc Processor) {
 
 // Start begins consuming jobs.
 func (p *Pool) Start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
 	for i := 0; i < p.concurrency; i++ {
-		go p.worker(ctx)
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			p.worker(ctx)
+		}()
+	}
+}
+
+// Stop signals workers to stop and waits for in-flight jobs to finish.
+func (p *Pool) Stop(ctx context.Context) error {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -65,7 +106,13 @@ func (p *Pool) worker(ctx context.Context) {
 			return
 		default:
 		}
-		payload, err := p.redis.Dequeue(ctx, "queue:jobs", p.pollInterval)
+
+		// Promote any delayed jobs whose time has come.
+		if err := p.redis.PromoteReadyDelayed(ctx, queueDelayed, queueJobs, p.now().Unix()); err != nil {
+			p.logger.Error("promote delayed jobs failed", "error", err)
+		}
+
+		payload, err := p.redis.Dequeue(ctx, queueJobs, p.pollInterval)
 		if err != nil {
 			p.logger.Error("dequeue error", "error", err)
 			continue
@@ -78,6 +125,16 @@ func (p *Pool) worker(ctx context.Context) {
 			p.logger.Error("unmarshal job", "error", err)
 			continue
 		}
+
+		// Skip if job is scheduled for the future.
+		if job.ScheduledAt > p.now().Unix() {
+			b, _ := json.Marshal(job)
+			if err := p.redis.EnqueueDelayed(ctx, queueDelayed, b, job.ScheduledAt); err != nil {
+				p.logger.Error("re-delay job failed", "error", err)
+			}
+			continue
+		}
+
 		proc, ok := p.processors[job.Type]
 		if !ok {
 			p.logger.Warn("no processor for job type", "type", job.Type)
@@ -87,8 +144,18 @@ func (p *Pool) worker(ctx context.Context) {
 			p.logger.Error("job failed", "type", job.Type, "error", err)
 			job.Attempts++
 			if job.Attempts < job.MaxAttempts {
+				backoff := time.Duration(job.Attempts) * 5 * time.Second
+				job.ScheduledAt = p.now().Add(backoff).Unix()
 				b, _ := json.Marshal(job)
-				_ = p.redis.Enqueue(ctx, "queue:jobs", b)
+				if err := p.redis.EnqueueDelayed(ctx, queueDelayed, b, job.ScheduledAt); err != nil {
+					p.logger.Error("enqueue delayed job failed", "error", err)
+				}
+			} else {
+				b, _ := json.Marshal(job)
+				if err := p.redis.EnqueueDead(ctx, queueDead, b); err != nil {
+					p.logger.Error("enqueue dead job failed", "error", err)
+				}
+				p.logger.Error("job dead-lettered", "type", job.Type, "id", job.ID, "attempts", job.Attempts)
 			}
 		}
 	}
@@ -101,12 +168,13 @@ func (p *Pool) Enqueue(ctx context.Context, jobType string, payload any) error {
 		return err
 	}
 	job := Job{
-		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:          uuid.Must(uuid.NewV7()).String(),
 		Type:        jobType,
 		Payload:     b,
 		MaxAttempts: 3,
-		CreatedAt:   time.Now().Unix(),
+		CreatedAt:   p.now().Unix(),
+		ScheduledAt: p.now().Unix(),
 	}
 	jb, _ := json.Marshal(job)
-	return p.redis.Enqueue(ctx, "queue:jobs", jb)
+	return p.redis.Enqueue(ctx, queueJobs, jb)
 }

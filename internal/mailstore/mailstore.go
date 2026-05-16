@@ -31,11 +31,16 @@ type SearchOptions struct {
 
 // MessagePatch contains optional fields for message updates.
 type MessagePatch struct {
-	IsRead     *bool
-	IsFlagged  *bool
-	IsAnswered *bool
-	IsDraft    *bool
-	Mailbox    *string
+	IsRead      *bool
+	IsFlagged   *bool
+	IsAnswered  *bool
+	IsDraft     *bool
+	Mailbox     *string
+	IsOutbound  *bool
+	Subject     *string
+	HTMLBody    *string
+	PlainText   *string
+	ToAddresses []string
 }
 
 // Store is the canonical interface for mail persistence.
@@ -64,6 +69,9 @@ type Store interface {
 	SetFlag(ctx context.Context, messageID uuid.UUID, flag string) error
 	ClearFlag(ctx context.Context, messageID uuid.UUID, flag string) error
 	GetFlags(ctx context.Context, messageID uuid.UUID) ([]string, error)
+	GetFlagsBatch(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]string, error)
+
+	UpdateLabel(ctx context.Context, domainID, userID, labelID uuid.UUID, name, color string) error
 
 	Search(ctx context.Context, domainID, userID uuid.UUID, query string, opts SearchOptions) ([]*models.Message, int64, error)
 	UpdateSearchVector(ctx context.Context, messageID uuid.UUID) error

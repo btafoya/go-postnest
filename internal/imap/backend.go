@@ -124,9 +124,17 @@ func (m *imapMailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, erro
 			unread, _ := m.backend.store.CountUnreadByLabel(ctx, m.domainID, m.user.ID, m.label.ID)
 			status.Unseen = uint32(unread)
 		case imap.StatusUidNext:
-			status.UidNext = 1 // TODO
+			// Approximate next UID as total messages + 1.
+			total, _ := m.backend.store.CountTotalByLabel(ctx, m.domainID, m.user.ID, m.label.ID)
+			status.UidNext = uint32(total) + 1
 		case imap.StatusUidValidity:
-			status.UidValidity = 1
+			// Derive a stable validity value from the label ID.
+			id := m.label.ID[:]
+			if len(id) >= 4 {
+				status.UidValidity = uint32(id[0])<<24 | uint32(id[1])<<16 | uint32(id[2])<<8 | uint32(id[3])
+			} else {
+				status.UidValidity = 1
+			}
 		case imap.StatusRecent:
 			status.Recent = 0
 		}
@@ -145,6 +153,12 @@ func (m *imapMailbox) ListMessages(uid bool, seqset *imap.SeqSet, items []imap.F
 		return err
 	}
 
+	var msgIDs []uuid.UUID
+	for _, msg := range msgs {
+		msgIDs = append(msgIDs, msg.ID)
+	}
+	flagMap, _ := m.backend.store.GetFlagsBatch(ctx, msgIDs)
+
 	for i, msg := range msgs {
 		seqNum := uint32(i + 1)
 		msgUID := messageUID(msg)
@@ -161,7 +175,7 @@ func (m *imapMailbox) ListMessages(uid bool, seqset *imap.SeqSet, items []imap.F
 		for _, item := range items {
 			switch item {
 			case imap.FetchFlags:
-				flags, _ := m.backend.store.GetFlags(ctx, msg.ID)
+				flags := flagMap[msg.ID]
 				if msg.IsRead {
 					flags = append(flags, imap.SeenFlag)
 				}

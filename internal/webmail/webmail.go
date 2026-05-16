@@ -2,6 +2,7 @@ package webmail
 
 import (
 	"encoding/json"
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,16 +12,25 @@ import (
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/mailstore"
 	"github.com/go-postnest/postnest/internal/models"
+	"github.com/go-postnest/postnest/internal/redis"
+	"github.com/go-postnest/postnest/internal/workers"
 )
+
+// DomainLister returns domain memberships for a user.
+type DomainLister interface {
+	GetUserDomains(ctx context.Context, userID uuid.UUID) ([]*models.DomainMember, error)
+}
 
 // Handler implements the webmail REST API.
 type Handler struct {
 	store mailstore.Store
+	auth  DomainLister
+	redis *redis.Client
 }
 
 // NewHandler creates a webmail handler.
-func NewHandler(store mailstore.Store) *Handler {
-	return &Handler{store: store}
+func NewHandler(store mailstore.Store, authSvc DomainLister, redis *redis.Client) *Handler {
+	return &Handler{store: store, auth: authSvc, redis: redis}
 }
 
 // RegisterRoutes mounts routes on a chi router.
@@ -50,15 +60,44 @@ func (h *Handler) currentUser(r *http.Request) *models.User {
 	return api.UserFromContext(r.Context())
 }
 
+func (h *Handler) domainID(r *http.Request) uuid.UUID {
+	if id := api.DomainIDFromContext(r.Context()); id != uuid.Nil {
+		return id
+	}
+	u := h.currentUser(r)
+	if u == nil {
+		return uuid.Nil
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	doms, err := h.auth.GetUserDomains(ctx, u.ID)
+	if err != nil || len(doms) == 0 {
+		return u.ID
+	}
+	return doms[0].DomainID
+}
+
 func (h *Handler) listLabels(w http.ResponseWriter, r *http.Request) {
 	u := h.currentUser(r)
-	labels, err := h.store.GetLabels(r.Context(), u.ID, u.ID) // domainID should come from context
+	did := h.domainID(r)
+	labels, err := h.store.GetLabels(r.Context(), did, u.ID)
 	if err != nil {
 		api.WriteError(w, err)
 		return
 	}
-	// TODO: compute unread/total counts per label
-	writeJSON(w, http.StatusOK, map[string]any{"labels": labels})
+	type labelOut struct {
+		*models.Label
+		Total  int64 `json:"total"`
+		Unread int64 `json:"unread"`
+	}
+	out := make([]labelOut, 0, len(labels))
+	for _, l := range labels {
+		lo := labelOut{Label: l}
+		lo.Total, _ = h.store.CountTotalByLabel(r.Context(), did, u.ID, l.ID)
+		lo.Unread, _ = h.store.CountUnreadByLabel(r.Context(), did, u.ID, l.ID)
+		out = append(out, lo)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"labels": out})
 }
 
 func (h *Handler) createLabel(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +111,7 @@ func (h *Handler) createLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	u := h.currentUser(r)
 	label := &models.Label{
-		DomainID: u.ID, // TODO: use domain context
+		DomainID: h.domainID(r),
 		UserID:   u.ID,
 		Name:     req.Name,
 		Color:    req.Color,
@@ -85,7 +124,25 @@ func (h *Handler) createLabel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateLabel(w http.ResponseWriter, r *http.Request) {
-	api.WriteError(w, api.ErrNotFound)
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	var req struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	if err := h.store.UpdateLabel(r.Context(), h.domainID(r), u.ID, id, req.Name, req.Color); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) deleteLabel(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +152,7 @@ func (h *Handler) deleteLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	if err := h.store.DeleteLabel(r.Context(), u.ID, u.ID, id); err != nil {
+	if err := h.store.DeleteLabel(r.Context(), h.domainID(r), u.ID, id); err != nil {
 		api.WriteError(w, err)
 		return
 	}
@@ -114,7 +171,7 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	msgs, total, err := h.store.ListMessages(r.Context(), u.ID, u.ID, labelID, mailstore.ListOptions{
+	msgs, total, err := h.store.ListMessages(r.Context(), h.domainID(r), u.ID, labelID, mailstore.ListOptions{
 		Limit:     limit,
 		Offset:    offset,
 		SortField: q.Get("sort"),
@@ -134,7 +191,7 @@ func (h *Handler) getMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	msg, err := h.store.GetMessage(r.Context(), u.ID, u.ID, id)
+	msg, err := h.store.GetMessage(r.Context(), h.domainID(r), u.ID, id)
 	if err != nil {
 		api.WriteError(w, err)
 		return
@@ -158,7 +215,7 @@ func (h *Handler) patchMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	u := h.currentUser(r)
 	patch := mailstore.MessagePatch{IsRead: req.IsRead, IsFlagged: req.IsFlagged}
-	if err := h.store.UpdateMessage(r.Context(), u.ID, u.ID, id, patch); err != nil {
+	if err := h.store.UpdateMessage(r.Context(), h.domainID(r), u.ID, id, patch); err != nil {
 		api.WriteError(w, err)
 		return
 	}
@@ -172,7 +229,7 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	if err := h.store.DeleteMessage(r.Context(), u.ID, u.ID, id); err != nil {
+	if err := h.store.DeleteMessage(r.Context(), h.domainID(r), u.ID, id); err != nil {
 		api.WriteError(w, err)
 		return
 	}
@@ -189,18 +246,19 @@ func (h *Handler) batchMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
+	did := h.domainID(r)
 	for _, id := range req.MessageIDs {
 		switch req.Action {
 		case "mark_read":
 			tr := true
-			_ = h.store.UpdateMessage(r.Context(), u.ID, u.ID, id, mailstore.MessagePatch{IsRead: &tr})
+			_ = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &tr})
 		case "mark_unread":
 			f := false
-			_ = h.store.UpdateMessage(r.Context(), u.ID, u.ID, id, mailstore.MessagePatch{IsRead: &f})
+			_ = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &f})
 		case "trash":
-			_ = h.store.MoveToMailbox(r.Context(), u.ID, u.ID, id, "TRASH")
+			_ = h.store.MoveToMailbox(r.Context(), did, u.ID, id, "TRASH")
 		case "delete":
-			_ = h.store.DeleteMessage(r.Context(), u.ID, u.ID, id)
+			_ = h.store.DeleteMessage(r.Context(), did, u.ID, id)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -234,7 +292,7 @@ func (h *Handler) getThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	thread, msgs, err := h.store.GetThread(r.Context(), u.ID, u.ID, id)
+	thread, msgs, err := h.store.GetThread(r.Context(), h.domainID(r), u.ID, id)
 	if err != nil {
 		api.WriteError(w, err)
 		return
@@ -244,43 +302,122 @@ func (h *Handler) getThread(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) createDraft(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Subject  string            `json:"subject"`
-		To       []map[string]string `json:"to"`
-		HTMLBody string            `json:"html_body"`
-		PlainText string           `json:"plain_text"`
+		Subject   string              `json:"subject"`
+		To        []map[string]string `json:"to"`
+		HTMLBody  string              `json:"html_body"`
+		PlainText string              `json:"plain_text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
 	u := h.currentUser(r)
-	msg := &models.Message{
-		DomainID:  u.ID,
-		UserID:    u.ID,
-		Subject:   req.Subject,
-		HTMLBody:  req.HTMLBody,
-		PlainText: req.PlainText,
-		IsDraft:   true,
-		Mailbox:   "DRAFTS",
-		CreatedAt: time.Now().UTC(),
+	did := h.domainID(r)
+	var toAddrs []string
+	for _, t := range req.To {
+		if addr, ok := t["address"]; ok && addr != "" {
+			toAddrs = append(toAddrs, addr)
+		}
 	}
-	// TODO: parse To into to_addresses
-	_ = msg
-	writeJSON(w, http.StatusCreated, map[string]any{"id": uuid.Must(uuid.NewV7())})
+	msg := &models.Message{
+		DomainID:    did,
+		UserID:      u.ID,
+		FromAddress: u.Email,
+		Subject:     req.Subject,
+		ToAddresses: toAddrs,
+		HTMLBody:    req.HTMLBody,
+		PlainText:   req.PlainText,
+		IsDraft:     true,
+		Mailbox:     "DRAFTS",
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := h.store.CreateMessage(r.Context(), msg, nil, nil); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": msg.ID})
 }
 
 func (h *Handler) updateDraft(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	var req struct {
+		Subject   string              `json:"subject"`
+		To        []map[string]string `json:"to"`
+		HTMLBody  string              `json:"html_body"`
+		PlainText string              `json:"plain_text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	did := h.domainID(r)
+	var toAddrs []string
+	for _, t := range req.To {
+		if addr, ok := t["address"]; ok && addr != "" {
+			toAddrs = append(toAddrs, addr)
+		}
+	}
+	patch := mailstore.MessagePatch{
+		Subject:     &req.Subject,
+		HTMLBody:    &req.HTMLBody,
+		PlainText:   &req.PlainText,
+		ToAddresses: toAddrs,
+	}
+	if err := h.store.UpdateMessage(r.Context(), did, u.ID, id, patch); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) sendDraft(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	did := h.domainID(r)
+	msg, err := h.store.GetMessage(r.Context(), did, u.ID, id)
+	if err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	if !msg.IsDraft {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"draft_id":     id.String(),
+		"user_id":      u.ID.String(),
+		"domain_id":    did.String(),
+		"from_address": u.Email,
+	})
+	job := workers.Job{
+		ID:          uuid.Must(uuid.NewV7()).String(),
+		Type:        "send_draft",
+		Payload:     payload,
+		MaxAttempts: 3,
+		CreatedAt:   time.Now().Unix(),
+		ScheduledAt: time.Now().Unix(),
+	}
+	jb, _ := json.Marshal(job)
+	if err := h.redis.Enqueue(r.Context(), "queue:jobs", jb); err != nil {
+		api.WriteError(w, api.ErrInternal)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued"})
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	u := h.currentUser(r)
-	msgs, total, err := h.store.Search(r.Context(), u.ID, u.ID, q, mailstore.SearchOptions{})
+	msgs, total, err := h.store.Search(r.Context(), h.domainID(r), u.ID, q, mailstore.SearchOptions{})
 	if err != nil {
 		api.WriteError(w, err)
 		return

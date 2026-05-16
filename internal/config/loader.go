@@ -33,6 +33,7 @@ type rawServer struct {
 	SMTPSAddr    string        `toml:"smtps_addr"`
 	ReadTimeout  time.Duration `toml:"read_timeout"`
 	WriteTimeout time.Duration `toml:"write_timeout"`
+	AllowedOrigins []string `toml:"allowed_origins"`
 }
 
 type rawDatabase struct {
@@ -110,6 +111,7 @@ func (l *Loader) Load() (*Config, error) {
 			SMTPSAddr:    ":465",
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 30 * time.Second,
+			AllowedOrigins: []string{},
 		},
 		Database: rawDatabase{
 			MaxConns: 25,
@@ -157,6 +159,7 @@ func (l *Loader) Load() (*Config, error) {
 		SMTPSAddr:             raw.Server.SMTPSAddr,
 		ReadTimeout:           raw.Server.ReadTimeout,
 		WriteTimeout:          raw.Server.WriteTimeout,
+		AllowedOrigins:        raw.Server.AllowedOrigins,
 		TLSCertPath:           raw.TLS.CertPath,
 		TLSKeyPath:            raw.TLS.KeyPath,
 		PostgresDSN:           raw.Database.DSN,

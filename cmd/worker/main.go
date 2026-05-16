@@ -12,6 +12,7 @@ import (
 	"github.com/go-postnest/postnest/internal/db"
 	"github.com/go-postnest/postnest/internal/logger"
 	"github.com/go-postnest/postnest/internal/mailstore"
+	"github.com/go-postnest/postnest/internal/postmark"
 	"github.com/go-postnest/postnest/internal/redis"
 	"github.com/go-postnest/postnest/internal/workers"
 )
@@ -43,11 +44,14 @@ func main() {
 	pool := workers.NewPool(redisClient, log, cfg.WorkerConcurrency, cfg.WorkerPollInterval)
 
 	// Register processors
+	postmarkClient := postmark.NewClient()
+
 	pool.Register("inbound", workers.NewInboundProcessor(mailStore, authService, log))
 	pool.Register("bounce", workers.NewBounceProcessor(pgPool, log))
 	pool.Register("delivery", workers.NewDeliveryProcessor(pgPool, log))
+	pool.Register("send_draft", workers.NewSendProcessor(mailStore, authService, postmarkClient, log))
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	pool.Start(ctx)
 	log.Info("worker pool started", "concurrency", cfg.WorkerConcurrency)
 
@@ -55,11 +59,11 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Info("shutting down workers")
-	cancel()
 
-	// Give workers time to finish current job
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
-	<-shutdownCtx.Done()
+	if err := pool.Stop(shutdownCtx); err != nil {
+		log.Error("worker shutdown timed out", "error", err)
+	}
 	log.Info("worker shutdown complete")
 }

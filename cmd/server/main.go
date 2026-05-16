@@ -55,7 +55,7 @@ func main() {
 	postmarkClient := postmark.NewClient()
 	_ = postmarkClient
 
-	webmailHandler := webmail.NewHandler(mailStore)
+	webmailHandler := webmail.NewHandler(mailStore, authService, redisClient)
 	webhookHandler := webhook.NewHandler(redisClient, cfg.PostmarkWebhookSecret)
 
 	r := chi.NewRouter()
@@ -63,7 +63,9 @@ func main() {
 	r.Use(api.RequestID)
 	r.Use(api.StructuredLogger(log))
 	r.Use(api.Recovery)
-	r.Use(api.CORS)
+	r.Use(api.CORS(cfg.AllowedOrigins))
+	rateLimiter := api.NewRateLimiter(100, time.Minute)
+	r.Use(rateLimiter.Handler)
 
 	// Public health
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +102,15 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireSession(authService))
 		r.Use(api.RequireDomainAdmin(authService))
-		// TODO: admin handlers
+		r.Get("/admin/api/v1/domains", func(w http.ResponseWriter, r *http.Request) {
+			user := api.UserFromContext(r.Context())
+			doms, err := authService.GetUserDomains(r.Context(), user.ID)
+			if err != nil {
+				api.WriteError(w, api.ErrInternal)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"domains": doms})
+		})
 	})
 
 	srv := &http.Server{
@@ -142,7 +152,9 @@ func main() {
 			log.Error("failed to create certificate manager", "error", err)
 			os.Exit(1)
 		}
-		if err := certMgr.Start(context.Background()); err != nil {
+		certMgrCtx, certMgrCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer certMgrCancel()
+		if err := certMgr.Start(certMgrCtx); err != nil {
 			log.Error("failed to start certificate manager", "error", err)
 			os.Exit(1)
 		}
@@ -186,10 +198,12 @@ func main() {
 	}()
 
 	// SMTP server
-	smtpSrv := smtp.NewServer(smtpAddr, tlsConfig, allowInsecureAuth, mailStore, authService, postmarkClient)
+	smtpSrv := smtp.NewServer(smtpAddr, tlsConfig, allowInsecureAuth, mailStore, authService, postmarkClient, cfg.MaxMessageSize)
+	smtpCtx, smtpCancel := context.WithCancel(context.Background())
+	defer smtpCancel()
 	go func() {
 		log.Info("smtp server starting", "addr", smtpAddr, "tls", tlsConfig != nil)
-		if err := smtpSrv.Start(context.Background()); err != nil {
+		if err := smtpSrv.Start(smtpCtx); err != nil {
 			log.Error("smtp server error", "error", err)
 		}
 	}()
@@ -218,6 +232,7 @@ func main() {
 	}
 
 	// Shutdown SMTP server
+	smtpCancel()
 	if err := smtpSrv.Stop(); err != nil {
 		log.Error("smtp shutdown error", "error", err)
 	}

@@ -300,6 +300,30 @@ func (s *Service) IsDomainAdmin(ctx context.Context, userID, domainID uuid.UUID)
 	return role == "admin" || role == "super_admin", nil
 }
 
+// IsDomainMember checks whether the user belongs to a domain (any role).
+func (s *Service) IsDomainMember(ctx context.Context, userID, domainID uuid.UUID) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM domain_members WHERE user_id=$1 AND domain_id=$2)`, userID, domainID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// GetDomainByID fetches a domain by its ID.
+func (s *Service) GetDomainByID(ctx context.Context, id uuid.UUID) (*models.Domain, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, name, postmark_token, postmark_stream, created_at, updated_at, settings
+		FROM domains WHERE id=$1
+	`, id)
+	var d models.Domain
+	err := row.Scan(&d.ID, &d.Name, &d.PostmarkToken, &d.PostmarkStream, &d.CreatedAt, &d.UpdatedAt, &d.Settings)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 // GetDomainByName fetches a domain by its name.
 func (s *Service) GetDomainByName(ctx context.Context, name string) (*models.Domain, error) {
 	row := s.pool.QueryRow(ctx, `

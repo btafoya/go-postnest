@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -27,8 +28,8 @@ type Server struct {
 }
 
 // NewServer creates an SMTP server.
-func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store mailstore.Store, auth *auth.Service, pm *postmark.Client) *Server {
-	be := &smtpBackend{store: store, auth: auth, postmark: pm}
+func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store mailstore.Store, auth *auth.Service, pm *postmark.Client, maxMsgSize int64) *Server {
+	be := &smtpBackend{store: store, auth: auth, postmark: pm, maxMsgSize: maxMsgSize}
 	s := smtp.NewServer(be)
 	s.Addr = addr
 	s.AllowInsecureAuth = allowInsecureAuth
@@ -66,9 +67,10 @@ func isClosedErr(err error) bool {
 }
 
 type smtpBackend struct {
-	store    mailstore.Store
-	auth     *auth.Service
-	postmark *postmark.Client
+	store       mailstore.Store
+	auth        *auth.Service
+	postmark    *postmark.Client
+	maxMsgSize  int64
 }
 
 func (b *smtpBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
@@ -90,6 +92,51 @@ func (s *smtpSession) Reset() {
 func (s *smtpSession) Logout() error { return nil }
 
 func (s *smtpSession) Mail(from string, opts *smtp.MailOptions) error {
+	if s.user == nil {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "authentication required",
+		}
+	}
+	parts := strings.Split(from, "@")
+	if len(parts) != 2 || parts[1] == "" {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 1, 2},
+			Message:      "invalid sender address",
+		}
+	}
+	domainName := parts[1]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	domain, err := s.backend.auth.GetDomainByName(ctx, domainName)
+	if err != nil {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "unknown domain",
+		}
+	}
+
+	member, err := s.backend.auth.IsDomainMember(ctx, s.user.ID, domain.ID)
+	if err != nil {
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "unable to verify domain membership",
+		}
+	}
+	if !member {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "sender domain not authorized",
+		}
+	}
+
 	s.from = from
 	return nil
 }
@@ -109,6 +156,26 @@ func (s *smtpSession) Data(r io.Reader) error {
 			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
 			Message:      "authentication required",
 		}
+	}
+
+	maxSize := s.backend.maxMsgSize
+	if maxSize > 0 {
+		body, err := io.ReadAll(io.LimitReader(r, maxSize+1))
+		if err != nil {
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 4, 5},
+				Message:      "failed to read message",
+			}
+		}
+		if int64(len(body)) > maxSize {
+			return &smtp.SMTPError{
+				Code:         552,
+				EnhancedCode: smtp.EnhancedCode{5, 3, 4},
+				Message:      "message exceeds maximum size",
+			}
+		}
+		r = bytes.NewReader(body)
 	}
 
 	mr, err := gomail.CreateReader(r)
@@ -264,7 +331,7 @@ func (s *smtpSession) Data(r io.Reader) error {
 }
 
 func (s *smtpSession) AuthMechanisms() []string {
-	return []string{sasl.Plain}
+	return []string{sasl.Plain, "LOGIN"}
 }
 
 func (s *smtpSession) Auth(mech string) (sasl.Server, error) {
@@ -279,8 +346,37 @@ func (s *smtpSession) Auth(mech string) (sasl.Server, error) {
 			s.user = user
 			return nil
 		}), nil
+	case "LOGIN":
+		return &loginServer{
+			authenticate: func(username, password string) error {
+				ctx := context.Background()
+				user, err := s.backend.auth.Authenticate(ctx, username, password)
+				if err != nil {
+					return err
+				}
+				s.user = user
+				return nil
+			},
+		}, nil
 	}
 	return nil, smtp.ErrAuthUnknownMechanism
+}
+
+// loginServer implements the SASL LOGIN server mechanism.
+type loginServer struct {
+	authenticate func(username, password string) error
+	username     string
+}
+
+func (ls *loginServer) Next(response []byte) (challenge []byte, done bool, err error) {
+	if ls.username == "" {
+		if len(response) == 0 {
+			return []byte("Username:"), false, nil
+		}
+		ls.username = string(response)
+		return []byte("Password:"), false, nil
+	}
+	return nil, true, ls.authenticate(ls.username, string(response))
 }
 
 func addressesToStrings(addrs []*gomail.Address) []string {

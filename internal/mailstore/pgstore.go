@@ -187,9 +187,14 @@ func (s *PGStore) UpdateMessage(ctx context.Context, domainID, userID, messageID
 			is_answered = coalesce($6, is_answered),
 			is_draft = coalesce($7, is_draft),
 			mailbox = coalesce($8, mailbox),
+			is_outbound = coalesce($9, is_outbound),
+			subject = coalesce($10, subject),
+			html_body = coalesce($10, html_body),
+			plain_text = coalesce($11, plain_text),
+			to_addresses = coalesce($12, to_addresses),
 			updated_at = now()
 		WHERE id=$1 AND domain_id=$2 AND user_id=$3
-	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox)
+	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox, patch.Subject, patch.HTMLBody, patch.PlainText, patch.ToAddresses)
 	return err
 }
 
@@ -260,6 +265,13 @@ func (s *PGStore) DeleteLabel(ctx context.Context, domainID, userID, labelID uui
 	return err
 }
 
+func (s *PGStore) UpdateLabel(ctx context.Context, domainID, userID, labelID uuid.UUID, name, color string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE labels SET name=$4, color=$5 WHERE id=$1 AND domain_id=$2 AND user_id=$3 AND is_system=false
+	`, labelID, domainID, userID, name, color)
+	return err
+}
+
 func (s *PGStore) ApplyLabels(ctx context.Context, messageID uuid.UUID, addLabelIDs, removeLabelIDs []uuid.UUID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -267,7 +279,10 @@ func (s *PGStore) ApplyLabels(ctx context.Context, messageID uuid.UUID, addLabel
 	}
 	defer tx.Rollback(ctx)
 	for _, lid := range removeLabelIDs {
-		_, _ = tx.Exec(ctx, `DELETE FROM message_labels WHERE message_id=$1 AND label_id=$2`, messageID, lid)
+		_, err = tx.Exec(ctx, `DELETE FROM message_labels WHERE message_id=$1 AND label_id=$2`, messageID, lid)
+		if err != nil {
+			return err
+		}
 	}
 	for _, lid := range addLabelIDs {
 		_, err = tx.Exec(ctx, `INSERT INTO message_labels (message_id, label_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, messageID, lid)
@@ -351,19 +366,22 @@ func (s *PGStore) FindOrCreateThread(ctx context.Context, domainID, userID uuid.
 }
 
 func (s *PGStore) CreateAttachments(ctx context.Context, attachments []*models.Attachment) error {
+	if len(attachments) == 0 {
+		return nil
+	}
 	for _, att := range attachments {
 		if att.ID == uuid.Nil {
 			att.ID = uuid.Must(uuid.NewV7())
 		}
-		_, err := s.pool.Exec(ctx, `
-			INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, data, content_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		`, att.ID, att.MessageID, att.Filename, att.ContentType, att.SizeBytes, att.Data, att.ContentID, time.Now().UTC())
-		if err != nil {
-			return err
-		}
 	}
-	return nil
+	now := time.Now().UTC()
+	cols := []string{"id", "message_id", "filename", "content_type", "size_bytes", "data", "content_id", "created_at"}
+	_, err := s.pool.CopyFrom(ctx, pgx.Identifier{"attachments"}, cols,
+		pgx.CopyFromSlice(len(attachments), func(i int) ([]any, error) {
+			att := attachments[i]
+			return []any{att.ID, att.MessageID, att.Filename, att.ContentType, att.SizeBytes, att.Data, att.ContentID, now}, nil
+		}))
+	return err
 }
 
 func (s *PGStore) GetAttachment(ctx context.Context, attachmentID uuid.UUID) (*models.Attachment, error) {
@@ -406,6 +424,27 @@ func (s *PGStore) GetFlags(ctx context.Context, messageID uuid.UUID) ([]string, 
 			return nil, err
 		}
 		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *PGStore) GetFlagsBatch(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]string, error) {
+	out := make(map[uuid.UUID][]string, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT message_id, flag FROM message_flags WHERE message_id = ANY($1)`, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var f string
+		if err := rows.Scan(&id, &f); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], f)
 	}
 	return out, rows.Err()
 }
@@ -464,7 +503,7 @@ func (s *PGStore) Search(ctx context.Context, domainID, userID uuid.UUID, query 
 }
 
 func (s *PGStore) UpdateSearchVector(ctx context.Context, messageID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `SELECT messages_update_search_vector() WHERE id=$1`, messageID)
+	_, err := s.pool.Exec(ctx, `UPDATE messages SET updated_at = updated_at WHERE id=$1`, messageID)
 	return err
 }
 
