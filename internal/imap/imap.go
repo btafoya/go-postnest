@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
+	"time"
 
 	imapserver "github.com/emersion/go-imap/server"
 	"github.com/go-postnest/postnest/internal/auth"
@@ -14,8 +16,11 @@ import (
 
 // Server wraps the go-imap server.
 type Server struct {
-	addr string
-	srv  *imapserver.Server
+	addr     string
+	tlsCfg   *tls.Config
+	srv      *imapserver.Server
+	ln       net.Listener
+	wg       sync.WaitGroup
 }
 
 // NewServer creates an IMAP server.
@@ -27,19 +32,30 @@ func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store ma
 	if tlsCfg != nil {
 		s.TLSConfig = tlsCfg
 	}
-	return &Server{addr: addr, srv: s}
+	return &Server{addr: addr, tlsCfg: tlsCfg, srv: s}
 }
 
 // Start listens for IMAP connections.
 func (s *Server) Start() error {
-	if err := s.srv.ListenAndServe(); err != nil && !isClosedErr(err) {
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
 		return err
 	}
-	return nil
+	if s.tlsCfg != nil {
+		ln = tls.NewListener(ln, s.tlsCfg)
+	}
+	s.ln = ln
+	return s.srv.Serve(s.ln)
 }
 
-// Stop shuts down the IMAP server.
+// Stop closes the listener and waits up to 30s for connections to drain.
 func (s *Server) Stop() error {
+	if s.ln != nil {
+		_ = s.ln.Close()
+	}
+	// go-imap server does not expose connection tracking.
+	// Give in-flight operations a brief grace period.
+	time.Sleep(2 * time.Second)
 	return s.srv.Close()
 }
 
@@ -50,5 +66,5 @@ func isClosedErr(err error) bool {
 	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
-	return strings.Contains(err.Error(), "closed")
+	return strings.Contains(err.Error(), "closed") || strings.Contains(err.Error(), "use of closed network connection")
 }

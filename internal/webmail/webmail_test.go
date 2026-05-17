@@ -113,6 +113,7 @@ func (m *mockStore) CountUnreadByLabel(ctx context.Context, domainID, userID uui
 func (m *mockStore) CountTotalByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error) {
 	return int64(len(m.messages)), nil
 }
+func (m *mockStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error { return nil }
 
 // mockAuth implements just enough for domain context.
 type mockAuth struct{}

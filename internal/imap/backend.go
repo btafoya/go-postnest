@@ -17,6 +17,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxIMAPBatchSize limits the number of messages loaded per query.
+// IMAP sequence numbering requires all messages to be loaded for correctness;
+// large mailboxes may need streaming or cursor-based pagination in future work.
+const maxIMAPBatchSize = 5000
+
 type imapBackend struct {
 	store mailstore.Store
 	auth  *auth.Service
@@ -148,7 +153,7 @@ func (m *imapMailbox) Check() error                        { return nil }
 func (m *imapMailbox) ListMessages(uid bool, seqset *imap.SeqSet, items []imap.FetchItem, ch chan<- *imap.Message) error {
 	defer close(ch)
 	ctx := context.Background()
-	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: 10000})
+	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: maxIMAPBatchSize})
 	if err != nil {
 		return err
 	}
@@ -226,7 +231,7 @@ func (m *imapMailbox) ListMessages(uid bool, seqset *imap.SeqSet, items []imap.F
 
 func (m *imapMailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uint32, error) {
 	ctx := context.Background()
-	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: 10000})
+	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: maxIMAPBatchSize})
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +280,7 @@ func (m *imapMailbox) CreateMessage(flags []string, date time.Time, body imap.Li
 
 func (m *imapMailbox) UpdateMessagesFlags(uid bool, seqset *imap.SeqSet, operation imap.FlagsOp, flags []string) error {
 	ctx := context.Background()
-	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: 10000})
+	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: maxIMAPBatchSize})
 	if err != nil {
 		return err
 	}
@@ -358,7 +363,7 @@ func (m *imapMailbox) CopyMessages(uid bool, seqset *imap.SeqSet, dest string) e
 		return backend.ErrNoSuchMailbox
 	}
 
-	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: 10000})
+	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: maxIMAPBatchSize})
 	if err != nil {
 		return err
 	}
@@ -383,20 +388,30 @@ func (m *imapMailbox) CopyMessages(uid bool, seqset *imap.SeqSet, dest string) e
 
 func (m *imapMailbox) Expunge() error {
 	ctx := context.Background()
-	msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: 10000})
-	if err != nil {
-		return err
-	}
-
-	for _, msg := range msgs {
-		flags, _ := m.backend.store.GetFlags(ctx, msg.ID)
-		for _, f := range flags {
-			if f == imap.DeletedFlag {
-				if err := m.backend.store.ApplyLabels(ctx, msg.ID, nil, []uuid.UUID{m.label.ID}); err != nil {
-					return err
+	offset := 0
+	for {
+		opts := mailstore.ListOptions{Limit: maxIMAPBatchSize, Offset: offset}
+		msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, opts)
+		if err != nil {
+			return err
+		}
+		if len(msgs) == 0 {
+			break
+		}
+		for _, msg := range msgs {
+			flags, _ := m.backend.store.GetFlags(ctx, msg.ID)
+			for _, f := range flags {
+				if f == imap.DeletedFlag {
+					if err := m.backend.store.ApplyLabels(ctx, msg.ID, nil, []uuid.UUID{m.label.ID}); err != nil {
+						return err
+					}
+					break
 				}
-				break
 			}
+		}
+		offset += len(msgs)
+		if len(msgs) < maxIMAPBatchSize {
+			break
 		}
 	}
 	return nil

@@ -1,8 +1,12 @@
 package webhook
 
 import (
-	"encoding/json"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -31,13 +35,46 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/webhooks/postmark/spam", h.handleSpam)
 }
 
+// readBody reads the request body and returns it as bytes.
+func readBody(r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	_ = r.Body.Close()
+	return body, nil
+}
+
+// verifySignature checks the HMAC-SHA256 signature of the request body.
+// Postmark sends the signature in X-Postmark-Signature header.
+// Falls back to X-Postmark-Server-Token comparison if signature header is absent.
+func (h *Handler) verifySignature(body []byte, r *http.Request) bool {
+	// Prefer HMAC-SHA256 signature verification.
+	if sig := r.Header.Get("X-Postmark-Signature"); sig != "" && h.secret != "" {
+		mac := hmac.New(sha256.New, []byte(h.secret))
+		mac.Write(body)
+		expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+		return hmac.Equal([]byte(expected), []byte(sig))
+	}
+
+	// Fallback to legacy token check.
+	token := r.Header.Get("X-Postmark-Server-Token")
+	return token != "" && token == h.secret
+}
+
 func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
-	if !h.verify(r) {
+	body, err := readBody(r)
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if !h.verifySignature(body, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
+
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
@@ -53,12 +90,18 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleBounce(w http.ResponseWriter, r *http.Request) {
-	if !h.verify(r) {
+	body, err := readBody(r)
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if !h.verifySignature(body, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
+
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
@@ -74,12 +117,18 @@ func (h *Handler) handleBounce(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleDelivery(w http.ResponseWriter, r *http.Request) {
-	if !h.verify(r) {
+	body, err := readBody(r)
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if !h.verifySignature(body, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
+
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
@@ -95,12 +144,18 @@ func (h *Handler) handleDelivery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSpam(w http.ResponseWriter, r *http.Request) {
-	if !h.verify(r) {
+	body, err := readBody(r)
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if !h.verifySignature(body, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
+
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
@@ -113,13 +168,6 @@ func (h *Handler) handleSpam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-}
-
-func (h *Handler) verify(r *http.Request) bool {
-	// In production, verify Postmark signature or compare a shared secret.
-	// For now accept all valid JSON POSTs with a basic secret check.
-	token := r.Header.Get("X-Postmark-Server-Token")
-	return token != "" && token == h.secret
 }
 
 func (h *Handler) dedup(ctx context.Context, payload map[string]any) bool {

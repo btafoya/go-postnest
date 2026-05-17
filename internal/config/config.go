@@ -54,6 +54,9 @@ type Config struct {
 	WorkerConcurrency  int           `env:"WORKER_CONCURRENCY" envDefault:"10"`
 	WorkerPollInterval time.Duration `env:"WORKER_POLL_INTERVAL" envDefault:"5s"`
 
+	// Security
+	AllowInsecureAuth bool `env:"ALLOW_INSECURE_AUTH" envDefault:"false"` // Allow plaintext IMAP/SMTP auth without TLS
+
 	// Limits
 	MaxMessageSize    int64 `env:"MAX_MESSAGE_SIZE" envDefault:"52428800"`    // 50MB
 	MaxAttachmentSize int64 `env:"MAX_ATTACHMENT_SIZE" envDefault:"26214400"` // 25MB

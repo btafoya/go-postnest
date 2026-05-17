@@ -2,8 +2,10 @@ package webmail
 
 import (
 	"encoding/json"
+	"fmt"
 	"context"
 	"net/http"
+	"net/mail"
 	"strconv"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/go-postnest/postnest/internal/models"
 	"github.com/go-postnest/postnest/internal/redis"
 	"github.com/go-postnest/postnest/internal/workers"
+	"github.com/microcosm-cc/bluemonday"
 )
 
 // DomainLister returns domain memberships for a user.
@@ -319,13 +322,17 @@ func (h *Handler) createDraft(w http.ResponseWriter, r *http.Request) {
 			toAddrs = append(toAddrs, addr)
 		}
 	}
+	if err := validateEmailAddresses(toAddrs); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
 	msg := &models.Message{
 		DomainID:    did,
 		UserID:      u.ID,
 		FromAddress: u.Email,
 		Subject:     req.Subject,
 		ToAddresses: toAddrs,
-		HTMLBody:    req.HTMLBody,
+		HTMLBody:    bluemonday.UGCPolicy().Sanitize(req.HTMLBody),
 		PlainText:   req.PlainText,
 		IsDraft:     true,
 		Mailbox:     "DRAFTS",
@@ -362,9 +369,14 @@ func (h *Handler) updateDraft(w http.ResponseWriter, r *http.Request) {
 			toAddrs = append(toAddrs, addr)
 		}
 	}
+	if err := validateEmailAddresses(toAddrs); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	sanitizedHTML := bluemonday.UGCPolicy().Sanitize(req.HTMLBody)
 	patch := mailstore.MessagePatch{
 		Subject:     &req.Subject,
-		HTMLBody:    &req.HTMLBody,
+		HTMLBody:    &sanitizedHTML,
 		PlainText:   &req.PlainText,
 		ToAddresses: toAddrs,
 	}
@@ -373,6 +385,16 @@ func (h *Handler) updateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// validateEmailAddresses checks that all strings are valid RFC 5322 addresses.
+func validateEmailAddresses(addrs []string) error {
+	for _, a := range addrs {
+		if _, err := mail.ParseAddress(a); err != nil {
+			return fmt.Errorf("invalid email address: %s", a)
+		}
+	}
+	return nil
 }
 
 func (h *Handler) sendDraft(w http.ResponseWriter, r *http.Request) {

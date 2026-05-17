@@ -182,10 +182,14 @@ func main() {
 		log.Info("static TLS configured", "cert", cfg.TLSCertPath)
 
 	default:
-		allowInsecureAuth = true
+		allowInsecureAuth = cfg.AllowInsecureAuth
 		imapAddr = cfg.IMAPAddr
 		smtpAddr = cfg.SMTPAddr
-		log.Info("running without TLS", "imap", imapAddr, "smtp", smtpAddr)
+		if allowInsecureAuth {
+			log.Warn("running without TLS with insecure auth allowed", "imap", imapAddr, "smtp", smtpAddr)
+		} else {
+			log.Info("running without TLS but insecure auth disabled", "imap", imapAddr, "smtp", smtpAddr)
+		}
 	}
 
 	// IMAP server

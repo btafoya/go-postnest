@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -23,8 +24,10 @@ import (
 
 // Server wraps the go-smtp server.
 type Server struct {
-	addr string
-	srv  *smtp.Server
+	addr   string
+	tlsCfg *tls.Config
+	srv    *smtp.Server
+	ln     net.Listener
 }
 
 // NewServer creates an SMTP server.
@@ -36,23 +39,37 @@ func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store ma
 	if tlsCfg != nil {
 		s.TLSConfig = tlsCfg
 	}
-	return &Server{addr: addr, srv: s}
+	return &Server{addr: addr, tlsCfg: tlsCfg, srv: s}
 }
 
 // Start listens for SMTP connections.
 func (s *Server) Start(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	if s.tlsCfg != nil {
+		ln = tls.NewListener(ln, s.tlsCfg)
+	}
+	s.ln = ln
 	go func() {
 		<-ctx.Done()
-		_ = s.srv.Close()
+		_ = s.ln.Close()
 	}()
-	if err := s.srv.ListenAndServe(); err != nil && !isClosedErr(err) {
+	if err := s.srv.Serve(s.ln); err != nil && !isClosedErr(err) {
 		return err
 	}
 	return nil
 }
 
-// Stop shuts down the SMTP server.
+// Stop closes the listener and waits up to 30s for connections to drain.
 func (s *Server) Stop() error {
+	if s.ln != nil {
+		_ = s.ln.Close()
+	}
+	// go-smtp server does not expose connection tracking.
+	// Give in-flight DATA sessions a brief grace period.
+	time.Sleep(2 * time.Second)
 	return s.srv.Close()
 }
 
@@ -142,6 +159,13 @@ func (s *smtpSession) Mail(from string, opts *smtp.MailOptions) error {
 }
 
 func (s *smtpSession) Rcpt(to string, opts *smtp.RcptOptions) error {
+	if _, err := mail.ParseAddress(to); err != nil {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 1, 3},
+			Message:      "invalid recipient address",
+		}
+	}
 	s.to = append(s.to, to)
 	return nil
 }

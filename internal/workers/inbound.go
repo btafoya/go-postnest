@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -13,19 +14,22 @@ import (
 	"github.com/go-postnest/postnest/internal/mailstore"
 	"github.com/go-postnest/postnest/internal/models"
 	"github.com/go-postnest/postnest/internal/postmark"
+	"github.com/microcosm-cc/bluemonday"
+	"github.com/go-postnest/postnest/internal/reputation"
 	"github.com/google/uuid"
 )
 
 // InboundProcessor handles Postmark inbound mail webhooks.
 type InboundProcessor struct {
-	store  mailstore.Store
-	auth   *auth.Service
-	logger *slog.Logger
+	store    mailstore.Store
+	auth     *auth.Service
+	rep      *reputation.Engine
+	logger   *slog.Logger
 }
 
 // NewInboundProcessor creates an inbound mail processor.
-func NewInboundProcessor(store mailstore.Store, auth *auth.Service, logger *slog.Logger) *InboundProcessor {
-	return &InboundProcessor{store: store, auth: auth, logger: logger}
+func NewInboundProcessor(store mailstore.Store, auth *auth.Service, rep *reputation.Engine, logger *slog.Logger) *InboundProcessor {
+	return &InboundProcessor{store: store, auth: auth, rep: rep, logger: logger}
 }
 
 // Process handles a single inbound mail job.
@@ -74,6 +78,26 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		}
 	}
 
+	// Evaluate reputation/greylist
+	if p.rep != nil {
+		decision, err := p.rep.EvaluateInbound(ctx, domain.ID, in.From, recipient, net.ParseIP(in.From))
+		if err != nil {
+			p.logger.Warn("reputation evaluation failed", "error", err)
+		} else {
+			switch decision {
+			case reputation.DecisionBlock:
+				p.logger.Info("inbound blocked by blacklist", "from", in.From, "to", recipient)
+				return fmt.Errorf("sender blacklisted: %s", in.From)
+			case reputation.DecisionGreylist:
+				p.logger.Info("inbound greylisted", "from", in.From, "to", recipient)
+				if err := p.rep.RecordGreylist(ctx, domain.ID, in.From, recipient, net.ParseIP(in.From)); err != nil {
+					p.logger.Warn("failed to record greylist", "error", err)
+				}
+				return fmt.Errorf("greylisted: retry later")
+			}
+		}
+	}
+
 	// Build message
 	msg := &models.Message{
 		ID:              uuid.Must(uuid.NewV7()),
@@ -86,7 +110,7 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		ToAddresses:     []string{recipient},
 		Date:            msgDate,
 		PlainText:       in.TextBody,
-		HTMLBody:        in.HTMLBody,
+		HTMLBody:        bluemonday.UGCPolicy().Sanitize(in.HTMLBody),
 		SizeBytes:       len(in.TextBody) + len(in.HTMLBody),
 		IsOutbound:      false,
 		IsRead:          false,

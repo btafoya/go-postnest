@@ -128,7 +128,11 @@ func (p *Pool) worker(ctx context.Context) {
 
 		// Skip if job is scheduled for the future.
 		if job.ScheduledAt > p.now().Unix() {
-			b, _ := json.Marshal(job)
+			b, err := json.Marshal(job)
+			if err != nil {
+				p.logger.Error("marshal job failed", "error", err)
+				continue
+			}
 			if err := p.redis.EnqueueDelayed(ctx, queueDelayed, b, job.ScheduledAt); err != nil {
 				p.logger.Error("re-delay job failed", "error", err)
 			}
@@ -146,13 +150,17 @@ func (p *Pool) worker(ctx context.Context) {
 			if job.Attempts < job.MaxAttempts {
 				backoff := time.Duration(job.Attempts) * 5 * time.Second
 				job.ScheduledAt = p.now().Add(backoff).Unix()
-				b, _ := json.Marshal(job)
-				if err := p.redis.EnqueueDelayed(ctx, queueDelayed, b, job.ScheduledAt); err != nil {
+				b, err := json.Marshal(job)
+				if err != nil {
+					p.logger.Error("marshal job failed", "error", err)
+				} else if err := p.redis.EnqueueDelayed(ctx, queueDelayed, b, job.ScheduledAt); err != nil {
 					p.logger.Error("enqueue delayed job failed", "error", err)
 				}
 			} else {
-				b, _ := json.Marshal(job)
-				if err := p.redis.EnqueueDead(ctx, queueDead, b); err != nil {
+				b, err := json.Marshal(job)
+				if err != nil {
+					p.logger.Error("marshal job failed", "error", err)
+				} else if err := p.redis.EnqueueDead(ctx, queueDead, b); err != nil {
 					p.logger.Error("enqueue dead job failed", "error", err)
 				}
 				p.logger.Error("job dead-lettered", "type", job.Type, "id", job.ID, "attempts", job.Attempts)
@@ -175,6 +183,9 @@ func (p *Pool) Enqueue(ctx context.Context, jobType string, payload any) error {
 		CreatedAt:   p.now().Unix(),
 		ScheduledAt: p.now().Unix(),
 	}
-	jb, _ := json.Marshal(job)
+	jb, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
 	return p.redis.Enqueue(ctx, queueJobs, jb)
 }

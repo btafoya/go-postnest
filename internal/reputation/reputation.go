@@ -53,6 +53,16 @@ func (e *Engine) EvaluateInbound(ctx context.Context, domainID uuid.UUID, from, 
 	return DecisionPass, nil
 }
 
+// RecordGreylist inserts a greylist triplet record.
+func (e *Engine) RecordGreylist(ctx context.Context, domainID uuid.UUID, senderEmail, recipientEmail string, senderIP net.IP) error {
+	_, err := e.pool.Exec(ctx, `
+		INSERT INTO greylist (id, domain_id, sender_email, sender_ip, recipient_email, created_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, now())
+		ON CONFLICT (domain_id, sender_email, sender_ip, recipient_email) DO NOTHING
+	`, domainID, senderEmail, senderIP.String(), recipientEmail)
+	return err
+}
+
 // UpdateReputation records an event for a contact.
 func (e *Engine) UpdateReputation(ctx context.Context, domainID uuid.UUID, email string, eventType string) error {
 	// Ensure contact exists

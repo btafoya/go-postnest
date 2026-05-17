@@ -118,20 +118,6 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 		return nil, 0, err
 	}
 
-	sortCol := "m.created_at"
-	if opts.SortField == "date" {
-		sortCol = "m.date"
-	} else if opts.SortField == "subject" {
-		sortCol = "m.subject"
-	} else if opts.SortField == "from" {
-		sortCol = "m.from_address"
-	} else if opts.SortField == "size" {
-		sortCol = "m.size_bytes"
-	}
-	order := "DESC"
-	if !opts.SortDesc {
-		order = "ASC"
-	}
 	limit := opts.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 50
@@ -141,7 +127,27 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 		offset = 0
 	}
 
-	query := fmt.Sprintf(`
+	// Build ORDER BY clause safely via whitelist to avoid fmt.Sprintf injection.
+	var orderBy string
+	switch opts.SortField {
+	case "date":
+		orderBy = "m.date"
+	case "subject":
+		orderBy = "m.subject"
+	case "from":
+		orderBy = "m.from_address"
+	case "size":
+		orderBy = "m.size_bytes"
+	default:
+		orderBy = "m.created_at"
+	}
+	if opts.SortDesc {
+		orderBy += " DESC"
+	} else {
+		orderBy += " ASC"
+	}
+
+	query := `
 		SELECT m.id, m.domain_id, m.user_id, m.thread_id, m.postmark_message_id, m.mailbox,
 			m.message_id_header, m.in_reply_to, m.references, m.subject,
 			m.from_address, m.from_name, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to,
@@ -150,9 +156,9 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 		FROM messages m
 		JOIN message_labels ml ON ml.message_id = m.id
 		WHERE m.domain_id=$1 AND m.user_id=$2 AND ($3::uuid IS NULL OR ml.label_id=$3)
-		ORDER BY %s %s
+		ORDER BY ` + orderBy + `
 		LIMIT $4 OFFSET $5
-	`, sortCol, order)
+	`
 
 	rows, err := s.pool.Query(ctx, query, domainID, userID, labelID, limit, offset)
 	if err != nil {
@@ -189,12 +195,12 @@ func (s *PGStore) UpdateMessage(ctx context.Context, domainID, userID, messageID
 			mailbox = coalesce($8, mailbox),
 			is_outbound = coalesce($9, is_outbound),
 			subject = coalesce($10, subject),
-			html_body = coalesce($10, html_body),
-			plain_text = coalesce($11, plain_text),
-			to_addresses = coalesce($12, to_addresses),
+			html_body = coalesce($11, html_body),
+			plain_text = coalesce($12, plain_text),
+			to_addresses = coalesce($13, to_addresses),
 			updated_at = now()
 		WHERE id=$1 AND domain_id=$2 AND user_id=$3
-	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox, patch.Subject, patch.HTMLBody, patch.PlainText, patch.ToAddresses)
+	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox, patch.IsOutbound, patch.Subject, patch.HTMLBody, patch.PlainText, patch.ToAddresses)
 	return err
 }
 
@@ -332,34 +338,58 @@ func (s *PGStore) GetThread(ctx context.Context, domainID, userID, threadID uuid
 }
 
 func (s *PGStore) FindOrCreateThread(ctx context.Context, domainID, userID uuid.UUID, subject, messageID, inReplyTo string, references []string) (*models.Thread, error) {
-	// Simplified: lookup by in_reply_to or subject_hash; create if missing.
+	// Use a transaction with SELECT FOR UPDATE to prevent race conditions.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	var threadID uuid.UUID
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT t.id FROM threads t
 		WHERE t.domain_id=$1 AND t.user_id=$2 AND (
 			$3 = ANY(t.message_ids) OR t.subject_hash=$4
 		)
 		LIMIT 1
+		FOR UPDATE
 	`, domainID, userID, inReplyTo, subject).Scan(&threadID)
 	if err == nil {
-		// append message_id to existing thread
-		_, _ = s.pool.Exec(ctx, `
+		_, _ = tx.Exec(ctx, `
 			UPDATE threads SET message_ids=array_append(message_ids,$3), updated_at=now()
 			WHERE id=$1 AND domain_id=$2
 		`, threadID, domainID, messageID)
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
 		return &models.Thread{ID: threadID, DomainID: domainID, UserID: userID}, nil
 	}
 	if err != pgx.ErrNoRows {
 		return nil, err
 	}
-	// create new thread
+
+	// create new thread with ON CONFLICT protection
 	threadID = uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
-	_, err = s.pool.Exec(ctx, `
+	res, err := tx.Exec(ctx, `
 		INSERT INTO threads (id, domain_id, user_id, subject_hash, message_ids, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$6)
+		ON CONFLICT (domain_id, user_id, subject_hash) DO NOTHING
 	`, threadID, domainID, userID, subject, []string{messageID}, now)
 	if err != nil {
+		return nil, err
+	}
+	if res.RowsAffected() == 0 {
+		// Conflict: another transaction created the thread. Select it.
+		err = tx.QueryRow(ctx, `
+			SELECT id FROM threads
+			WHERE domain_id=$1 AND user_id=$2 AND subject_hash=$3
+		`, domainID, userID, subject).Scan(&threadID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return &models.Thread{ID: threadID, DomainID: domainID, UserID: userID}, nil
@@ -503,7 +533,16 @@ func (s *PGStore) Search(ctx context.Context, domainID, userID uuid.UUID, query 
 }
 
 func (s *PGStore) UpdateSearchVector(ctx context.Context, messageID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `UPDATE messages SET updated_at = updated_at WHERE id=$1`, messageID)
+	_, err := s.pool.Exec(ctx, `
+		UPDATE messages SET
+			search_vector =
+				setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
+				setweight(to_tsvector('english', coalesce(from_address, '')), 'B') ||
+				setweight(to_tsvector('english', coalesce(from_name, '')), 'B') ||
+				setweight(to_tsvector('english', coalesce(plain_text, '')), 'C') ||
+				setweight(to_tsvector('simple', coalesce(to_addresses::text, '')), 'D')
+		WHERE id=$1
+	`, messageID)
 	return err
 }
 
@@ -525,6 +564,14 @@ func (s *PGStore) CountTotalByLabel(ctx context.Context, domainID, userID uuid.U
 		WHERE m.domain_id=$1 AND m.user_id=$2 AND ml.label_id=$3
 	`, domainID, userID, labelID).Scan(&count)
 	return count, err
+}
+
+func (s *PGStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO delivery_logs (id, message_id, domain_id, recipient, status, postmark_message_id, details, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, log.ID, log.MessageID, log.DomainID, log.Recipient, log.Status, log.PostmarkMessageID, log.Details, log.CreatedAt, log.UpdatedAt)
+	return err
 }
 
 // ErrNotFound indicates the requested resource does not exist.

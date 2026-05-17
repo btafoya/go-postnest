@@ -14,6 +14,7 @@ import (
 	"github.com/go-postnest/postnest/internal/mailstore"
 	"github.com/go-postnest/postnest/internal/postmark"
 	"github.com/go-postnest/postnest/internal/redis"
+	"github.com/go-postnest/postnest/internal/reputation"
 	"github.com/go-postnest/postnest/internal/workers"
 )
 
@@ -40,16 +41,18 @@ func main() {
 
 	authService := auth.NewService(pgPool.Pool, cfg.Argon2idTime, cfg.Argon2idMemory, cfg.Argon2idThreads, cfg.SessionKey)
 	mailStore := mailstore.NewPGStore(pgPool.Pool)
+	repEngine := reputation.NewEngine(pgPool.Pool)
 
 	pool := workers.NewPool(redisClient, log, cfg.WorkerConcurrency, cfg.WorkerPollInterval)
 
 	// Register processors
 	postmarkClient := postmark.NewClient()
 
-	pool.Register("inbound", workers.NewInboundProcessor(mailStore, authService, log))
+	pool.Register("inbound", workers.NewInboundProcessor(mailStore, authService, repEngine, log))
 	pool.Register("bounce", workers.NewBounceProcessor(pgPool, log))
 	pool.Register("delivery", workers.NewDeliveryProcessor(pgPool, log))
 	pool.Register("send_draft", workers.NewSendProcessor(mailStore, authService, postmarkClient, log))
+	pool.Register("spam", workers.NewSpamProcessor(repEngine, log))
 
 	ctx := context.Background()
 	pool.Start(ctx)

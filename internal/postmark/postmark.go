@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"time"
 
 	lib "github.com/mrz1836/postmark"
 )
@@ -47,6 +49,7 @@ type SendResponse struct {
 // SendEmail sends a single email via Postmark.
 func (c *Client) SendEmail(ctx context.Context, apiToken string, msg *OutboundMessage) (*SendResponse, error) {
 	client := lib.NewClient(apiToken, "")
+	client.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 	email := lib.Email{
 		From:          msg.From,

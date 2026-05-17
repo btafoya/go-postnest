@@ -184,18 +184,20 @@ func extractToken(r *http.Request) string {
 
 // RateLimiter is a simple per-IP token-bucket rate limiter.
 type RateLimiter struct {
-	requests int
-	window  time.Duration
-	clients map[string][]time.Time
-	mu      sync.Mutex
+	requests    int
+	window      time.Duration
+	clients     map[string][]time.Time
+	mu          sync.Mutex
+	lastCleanup time.Time
 }
 
 // NewRateLimiter creates a rate limiter allowing `requests` per `window`.
 func NewRateLimiter(requests int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		requests: requests,
-		window:   window,
-		clients:  make(map[string][]time.Time),
+		requests:    requests,
+		window:      window,
+		clients:     make(map[string][]time.Time),
+		lastCleanup: time.Now(),
 	}
 }
 
@@ -208,6 +210,23 @@ func (rl *RateLimiter) Handler(next http.Handler) http.Handler {
 		}
 		now := time.Now()
 		rl.mu.Lock()
+		// Periodic cleanup of stale IP entries to prevent unbounded map growth.
+		if now.Sub(rl.lastCleanup) > rl.window {
+			for clientIP, timestamps := range rl.clients {
+				var fresh []time.Time
+				for _, t := range timestamps {
+					if now.Sub(t) < rl.window {
+						fresh = append(fresh, t)
+					}
+				}
+				if len(fresh) == 0 {
+					delete(rl.clients, clientIP)
+				} else {
+					rl.clients[clientIP] = fresh
+				}
+			}
+			rl.lastCleanup = now
+		}
 		var times []time.Time
 		for _, t := range rl.clients[ip] {
 			if now.Sub(t) < rl.window {

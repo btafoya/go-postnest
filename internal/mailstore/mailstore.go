@@ -78,4 +78,6 @@ type Store interface {
 
 	CountUnreadByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error)
 	CountTotalByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error)
+
+	CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error
 }

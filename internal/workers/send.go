@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/go-postnest/postnest/internal/auth"
 	"github.com/go-postnest/postnest/internal/mailstore"
+	"github.com/go-postnest/postnest/internal/models"
 	"github.com/go-postnest/postnest/internal/postmark"
 	"github.com/google/uuid"
 )
@@ -91,6 +93,25 @@ func (p *SendProcessor) Process(ctx context.Context, job *Job) error {
 	if err := p.store.UpdateMessage(ctx, domainID, userID, draftID, patch); err != nil {
 		p.logger.Error("failed to update sent draft", "error", err)
 		return fmt.Errorf("update message: %w", err)
+	}
+
+	// Record delivery log for bounce/delivery webhook correlation.
+	dl := &models.DeliveryLog{
+		ID:                uuid.Must(uuid.NewV7()),
+		MessageID:         draftID,
+		DomainID:          domainID,
+		Recipient:         msg.ToAddresses[0],
+		Status:            "sent",
+		PostmarkMessageID: res.MessageID,
+		Details:           map[string]any{"postmark_response": res},
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	if len(msg.ToAddresses) > 1 {
+		dl.Details["all_recipients"] = msg.ToAddresses
+	}
+	if err := p.store.CreateDeliveryLog(ctx, dl); err != nil {
+		p.logger.Error("failed to create delivery log", "error", err)
 	}
 
 	p.logger.Info("draft sent", "draft_id", draftID, "postmark_id", res.MessageID)
