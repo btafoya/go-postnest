@@ -67,7 +67,7 @@ CREATE TABLE messages (
     mailbox VARCHAR(255) NOT NULL,
     message_id_header VARCHAR(998),
     in_reply_to VARCHAR(998),
-    references TEXT[],
+	    "references" TEXT[],
     subject TEXT,
     from_address VARCHAR(254),
     from_name VARCHAR(128),

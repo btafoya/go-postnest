@@ -267,6 +267,16 @@ func (s *Service) UpdatePassword(ctx context.Context, userID uuid.UUID, oldPassw
 	return err
 }
 
+// AdminResetPassword resets a user's password without verifying the old one.
+func (s *Service) AdminResetPassword(ctx context.Context, userID uuid.UUID, newPassword string) error {
+	newHash, err := s.hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `UPDATE users SET password_hash=$2, updated_at=now() WHERE id=$1`, userID, newHash)
+	return err
+}
+
 // GetUserDomains returns domain memberships for a user.
 func (s *Service) GetUserDomains(ctx context.Context, userID uuid.UUID) ([]*models.DomainMember, error) {
 	rows, err := s.pool.Query(ctx, `SELECT domain_id, user_id, role, created_at FROM domain_members WHERE user_id=$1`, userID)

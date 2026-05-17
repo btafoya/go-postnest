@@ -92,6 +92,10 @@ func main() {
 	// Webhook routes (public but secret-verified)
 	webhookHandler.RegisterRoutes(r)
 
+	// Public auth routes
+	authHandler := api.NewAuthHandler(authService, cfg.SessionKey)
+	authHandler.RegisterRoutes(r)
+
 	// Authenticated API routes
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireSession(authService))

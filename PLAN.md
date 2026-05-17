@@ -187,3 +187,5 @@ Services:
 | [emersion/go-message](https://github.com/emersion/go-message) | RFC822 and MIME parsing |
 | [emersion/go-webdav](https://github.com/emersion/go-webdav) | WebDAV, CardDAV, CalDAV |
 | [kardianos/service](https://github.com/kardianos/service) | System service management |
+https://gin-gonic.com/
+https://github.com/go-playground/validator

@@ -333,8 +333,41 @@ func (s *PGStore) GetThread(ctx context.Context, domainID, userID, threadID uuid
 		}
 		return nil, nil, err
 	}
-	msgs, _, err := s.ListMessages(ctx, domainID, userID, nil, ListOptions{Limit: 1000, SortField: "date", SortDesc: true})
-	return &t, msgs, err
+	rows, err := s.pool.Query(ctx, `
+		SELECT m.id, m.domain_id, m.user_id, m.thread_id, m.postmark_message_id, m.mailbox,
+			m.message_id_header, m.in_reply_to, m.references, m.subject,
+			m.from_address, m.from_name, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to,
+			m.date, m.plain_text, m.html_body, m.source, m.size_bytes,
+			m.is_draft, m.is_outbound, m.is_read, m.is_flagged, m.is_answered, m.created_at, m.updated_at
+		FROM messages m
+		WHERE m.domain_id=$1 AND m.user_id=$2 AND m.thread_id=$3
+		ORDER BY m.date DESC
+		LIMIT 1000
+	`, domainID, userID, threadID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var msgs []*models.Message
+	for rows.Next() {
+		var m models.Message
+		var tid *uuid.UUID
+		if err := rows.Scan(
+			&m.ID, &m.DomainID, &m.UserID, &tid, &m.PostmarkMessageID, &m.Mailbox,
+			&m.MessageIDHeader, &m.InReplyTo, &m.References, &m.Subject,
+			&m.FromAddress, &m.FromName, &m.ToAddresses, &m.CcAddresses, &m.BccAddresses, &m.ReplyTo,
+			&m.Date, &m.PlainText, &m.HTMLBody, &m.Source, &m.SizeBytes,
+			&m.IsDraft, &m.IsOutbound, &m.IsRead, &m.IsFlagged, &m.IsAnswered, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, nil, err
+		}
+		m.ThreadID = tid
+		msgs = append(msgs, &m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return &t, msgs, nil
 }
 
 func (s *PGStore) FindOrCreateThread(ctx context.Context, domainID, userID uuid.UUID, subject, messageID, inReplyTo string, references []string) (*models.Thread, error) {

@@ -5,6 +5,8 @@ services:
       POSTGRES_USER: postnest
       POSTGRES_PASSWORD: ${POSTNEST_DATABASE_PASSWORD:-changeme}
       POSTGRES_DB: postnest
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -49,6 +51,22 @@ services:
     volumes:
       - ${POSTNEST_TLS_CERT_PATH:-/dev/null}:/etc/postnest/tls.crt:ro
       - ${POSTNEST_TLS_KEY_PATH:-/dev/null}:/etc/postnest/tls.key:ro
+
+  webui:
+    build:
+      context: .
+      dockerfile: Dockerfile.webui
+    environment:
+      WEBUI_ADDR: ":3000"
+      WEBUI_API_BASE_URL: "http://server:8080"
+      WEBUI_REDIS_URL: "redis://redis:6379/0"
+    ports:
+      - "2626:3000"
+    depends_on:
+      server:
+        condition: service_started
+      redis:
+        condition: service_healthy
 
   worker:
     build:

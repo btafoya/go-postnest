@@ -4,3 +4,16 @@
 skills-lock.json
 .gograph/
 .serena/
+# Build artifacts
+/admin
+/server
+/webui
+/worker
+/migrate
+
+# Environment
+.env
+
+# Node modules
+web/node_modules/
+web/package-lock.json
