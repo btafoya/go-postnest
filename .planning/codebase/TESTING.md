@@ -1,101 +1,104 @@
 # Testing Patterns
 
-This document describes how tests are structured, what tools are used, how dependencies are mocked, and the observable coverage across the Postnest codebase.
+## Framework
 
-## Framework & Tooling
+- **Standard library only**: `testing` + `net/http/httptest`.
+- No external assertion libraries (`testify`, `gotest.tools`, etc.).
+- Tests are run with `go test ./...`.
 
-- **Pure standard library**: only `testing` is used. No `testify`, `ginkgo`, `gomega`, or `mockgen` appear in `go.mod`.
-- **Redis**: `github.com/alicebob/miniredis/v2` provides an in-memory Redis server for tests.
-- **HTTP**: `net/http/httptest` is used for handler and middleware tests.
-- **Files**: `os.WriteFile` and `t.TempDir()` are used for config-loader tests.
+## Test File Layout
 
-## File & Package Layout
-
-- Test files are co-located with production code: `*_test.go` in the same package.
-- Examples:
-  - `internal/api/errors_test.go` tests `internal/api/errors.go`
-  - `internal/webmail/webmail_test.go` tests `internal/webmail/webmail.go`
-  - `internal/config/loader_test.go` tests `internal/config/loader.go`
+- Tests live in the same package as the code under test (`package api`, `package redis`, etc.).
+- File naming: `{module}_test.go` (`errors_test.go`, `middleware_test.go`, `redis_test.go`).
 
 ## Test Naming
 
-Tests follow the Go convention `Test<Name>` with PascalCase. Scenarios are separated by underscores:
+Tests use descriptive, sentence-like names following the pattern:
 
-```go
-func TestLoader_Load_FromFile(t *testing.T)       // config/loader_test.go
-func TestRateLimiter_BlocksOverLimit(t *testing.T) // api/middleware_test.go
-func TestWorker_RetryAndDeadLetter(t *testing.T)   // workers/workers_test.go
+```
+Test<Function>_<Scenario>
 ```
 
-No subtests (`t.Run`) are used in the existing suite, but the naming convention already encodes the scenario.
+Examples:
+- `TestCORS_AllowedOrigin`
+- `TestRateLimiter_BlocksOverLimit`
+- `TestEnqueueDelayed_PromotesReadyDelayed`
+- `TestDedup_DuplicateMessage`
+- `TestWorker_RetryAndDeadLetter`
 
-## Setup & Teardown Helpers
+## Assertions
 
-Each test package defines small setup helpers that create fresh resources:
+| Situation | Pattern |
+|-----------|---------|
+| Fatal setup error | `t.Fatalf("setup description: %v", err)` |
+| Fatal logical failure | `t.Fatal("expected X")` |
+| Non-fatal mismatch | `t.Errorf("field = %q, want %q", got, want)` |
+| Boolean expectation | `if !ok { t.Error("expected X") }` |
 
-```go
-// internal/redis/redis_test.go
-func setupTestRedis(t *testing.T) (*Client, *miniredis.Miniredis) {
-    m := miniredis.RunT(t)
-    c, err := New("redis://" + m.Addr())
-    if err != nil { t.Fatalf(...) }
-    return c, m
-}
-
-// internal/workers/workers_test.go
-func setupTestPool(t *testing.T) (*Pool, *miniredis.Miniredis, *time.Time) { ... }
-
-// internal/webmail/webmail_test.go
-func newTestHandler() (*Handler, *mockStore) { ... }
-```
-
-These helpers guarantee isolation: every test gets a new Redis instance, new pool, or new in-memory store.
+No table-driven tests are used in the current suite; each scenario is a separate top-level function.
 
 ## Mocking
 
-Mocks are hand-written structs that implement the interface(s) required by the unit under test. Only methods actually exercised by tests carry real logic; the rest return zero values:
+All mocks are **hand-rolled** in test files or in a `*_test.go` helper.
+
+### In-Memory Mocks
+
+- `mockStore` in `webmail_test.go` implements `mailstore.Store` with in-memory slices (`messages []*models.Message`, `labels []*models.Label`).
+- `mockAuth` in `webmail_test.go` implements `DomainLister`.
+- `testProcessor` in `workers_test.go` implements `workers.Processor` with `called int` and `fail bool`.
+
+### Partial Implementations
+
+Mocks implement the full interface but stub methods that are not relevant to the test with zero-value returns:
 
 ```go
-// internal/webmail/webmail_test.go
-type mockStore struct { messages []*models.Message; labels []*models.Label }
-
-func (m *mockStore) CreateMessage(...) error { m.messages = append(m.messages, msg); return nil }
-func (m *mockStore) GetMessage(...) (*models.Message, error) { ... }
-func (m *mockStore) DeleteMessage(...) error { return nil } // stub
+func (m *mockStore) DeleteMessage(ctx context.Context, ...) error { return nil }
+func (m *mockStore) GetAttachment(ctx context.Context, ...) (*models.Attachment, error) { return nil, nil }
 ```
 
-```go
-// internal/workers/workers_test.go
-type testProcessor struct { called int; fail bool }
+## External Dependency Replacement
 
-func (tp *testProcessor) Process(ctx context.Context, job *Job) error {
-    tp.called++
-    if tp.fail { return errors.New("process error") }
-    return nil
+| Dependency | Replacement | Usage |
+|------------|-------------|-------|
+| Redis | `github.com/alicebob/miniredis/v2` | `miniredis.RunT(t)` creates an isolated in-memory Redis server per test. |
+| PostgreSQL | Hand-rolled mocks (no `pgx` mock library) | `mailstore.Store` interface allows swapping the real DB for an in-memory mock. |
+| Time | `nowFunc` injection | `Pool.nowFunc` is replaced in tests to control `time.Now()` behavior. |
+| HTTP | `net/http/httptest` | `httptest.NewRecorder()` and `httptest.NewRequest(...)` for handler tests. |
+
+### Redis Test Helpers
+
+Each Redis-dependent package follows the same setup pattern:
+
+```go
+func setupTestRedis(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
+    m := miniredis.RunT(t)
+    c, err := redis.New("redis://" + m.Addr())
+    if err != nil {
+        t.Fatalf("new redis client: %v", err)
+    }
+    return c, m
 }
 ```
 
-No mocking framework is used; this keeps the test dependency tree minimal and avoids generated-code drift.
+`miniredis.FastForward(duration)` is used to advance TTLs and timeouts without real sleeps.
 
-## HTTP Handler / Middleware Tests
-
-HTTP tests construct requests with `httptest.NewRequest` and record responses with `httptest.NewRecorder`:
+### Worker Pool Test Helpers
 
 ```go
-req := httptest.NewRequest(http.MethodGet, "/", nil)
-req.Header.Set("Origin", "https://example.com")
-rr := httptest.NewRecorder()
-h.ServeHTTP(rr, req)
+func setupTestPool(t *testing.T) (*Pool, *miniredis.Miniredis, *time.Time) {
+    m := miniredis.RunT(t)
+    c, _ := redis.New("redis://" + m.Addr())
+    p := NewPool(c, logger, 1, 100*time.Millisecond)
+    now := time.Now()
+    p.nowFunc = func() time.Time { return now }
+    return p, m, &now
+}
 ```
 
-Assertions check status code, headers, cookies, or body fragments:
+## HTTP Handler Testing
 
-```go
-if rr.Code != http.StatusNoContent { t.Errorf("status = %d, want %d", ...) }
-if got := rr.Header().Get("Access-Control-Allow-Origin"); got != want { ... }
-```
-
-When testing `chi` handlers that read URL parameters, the route context is injected manually:
+- Requests are built with `httptest.NewRequest(method, path, body)`.
+- `chi` route context values are injected manually when URL parameters are required:
 
 ```go
 chiCtx := chi.NewRouteContext()
@@ -103,133 +106,54 @@ chiCtx.URLParams.Add("id", draftID.String())
 req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, chiCtx))
 ```
 
-Authentication context is injected via `api.WithUser`:
+- Authentication context is injected with `api.WithUser(req.Context(), &models.User{...})`.
+- Response assertions check `rr.Code`, `rr.Header()`, and `rr.Body.String()`.
 
-```go
-req = req.WithContext(api.WithUser(req.Context(), &models.User{...}))
-```
+## Configuration Testing
 
-## Redis Tests
+- `t.TempDir()` creates isolated directories for config file tests.
+- `t.Setenv(key, value)` is used for env-override tests; Go automatically cleans up after the test.
+- Legacy environment variable fallback is tested by writing to the real environment (`t.Setenv`).
 
-Redis tests rely on `miniredis`:
+## Time Manipulation
 
-```go
-m := miniredis.RunT(t)
-c, _ := redis.New("redis://" + m.Addr())
-```
+- **Injected clocks**: `Pool.nowFunc` is replaced with a closure that returns a controllable `time.Time`.
+- **miniredis time travel**: `m.FastForward(10 * time.Second)` advances the Redis server's internal clock.
+- Real sleeps are used sparingly for worker pool lifecycle tests (`time.Sleep(300 * time.Millisecond)`) where polling is unavoidable.
 
-`miniredis` provides `FastForward(duration)` to simulate TTL expiry without real sleeps:
+## Coverage Patterns
 
-```go
-_ = h.dedup(ctx, payload)
-m.FastForward(6 * time.Minute) // advance past the 5-minute TTL
-if !h.dedup(ctx, payload) { t.Error("expected true after TTL expiry") }
-```
+### Error Paths
 
-Tests also verify sorted-set scores, list lengths, and blocking pop behaviour:
+- Tests verify that malformed input produces the expected error:
+  - `TestVerifyPassword_InvalidHash` checks both `"nope"` and `""` hashes.
+  - `TestAs_NonAppError` confirms a plain error does not match `*AppError`.
 
-```go
-items, _ := c.UniversalClient.ZRangeByScore(ctx, "delayed", &goredis.ZRangeBy{Min:"-inf", Max:"+inf"}).Result()
-```
+### Boundary Conditions
 
-## Async / Time-Based Tests
+- Rate limiter: exactly at-limit requests pass, the next is blocked.
+- Worker retries: `MaxAttempts = 2` results in exactly one dead-letter entry after two failures.
+- Dedup TTL: a key evicted after 6 minutes is treated as a new message.
 
-The worker tests deal with asynchronous job processing. Two techniques are used:
+### Middleware
 
-1. **Time injection**: `Pool` exposes a `nowFunc` field that tests replace to control time:
-   ```go
-   p.nowFunc = func() time.Time { return now }
-   ```
+- Each middleware is tested in isolation:
+  - `CORS` with allowed, disallowed, and preflight origins.
+  - `Recovery` with an explicit `panic("boom")`.
+  - `RateLimiter` with burst and over-limit sequences.
+  - `SetSessionCookie` inspects the cookie attributes (`HttpOnly`, `Secure`, `SameSite`, `MaxAge`).
 
-2. **Polling loops**: tests sleep briefly and poll for side effects rather than relying on exact timing:
-   ```go
-   found := false
-   for i := 0; i < 30; i++ {
-       if tp.called > 0 { found = true; break }
-       time.Sleep(50 * time.Millisecond)
-   }
-   ```
+## What Is Not Tested
 
-3. **Clock advancement**: `miniredis.FastForward` advances Redis-internal TTLs and BRPop timeouts.
+- There are **no integration tests** against a real PostgreSQL instance.
+- There are **no end-to-end tests** or browser automation tests.
+- There is **no benchmark suite** (`*_bench.go`).
+- There is **no fuzz testing**.
+- There is **no race detector annotation** (`-race` is not mentioned).
 
-## Configuration Tests
+## Test Isolation
 
-`config/loader_test.go` demonstrates file and environment testing:
-
-```go
-dir := t.TempDir()
-path := filepath.Join(dir, "postnest.conf")
-_ = os.WriteFile(path, []byte(content), 0640)
-```
-
-Environment variables are set with `t.Setenv` (automatically cleaned up):
-
-```go
-t.Setenv("POSTNEST_DATABASE_DSN", "postgres://env@localhost/env")
-```
-
-Legacy environment variables are tested by setting the old key and asserting the loader maps it correctly:
-
-```go
-t.Setenv("POSTGRES_DSN", "postgres://legacy@localhost/legacy")
-```
-
-Missing-required validation is tested by invoking `Load()` with no config file and no env vars, expecting a non-nil error.
-
-## Error Tests
-
-`internal/api/errors_test.go` exercises the custom error type:
-
-```go
-inner := ErrNotFound
-wrapped := fmt.Errorf("wrapped: %w", inner)
-var target *AppError
-if !As(wrapped, &target) { t.Fatal("expected As to match") }
-```
-
-It covers three cases:
-1. **Wrapped** — `errors.As` unwraps through `fmt.Errorf("%w")`.
-2. **Direct** — sentinel error matches directly.
-3. **Non-AppError** — plain `error` does not match.
-
-## Assertion Style
-
-- `t.Fatalf` is reserved for **setup failures** or conditions that make the rest of the test meaningless (e.g. can’t write temp file, can’t connect to miniredis).
-- `t.Errorf` is used for **assertion mismatches** (wrong status code, wrong header, wrong count).
-- No helper like `assertEq` is defined; comparisons are written inline. This is verbose but avoids an external dependency.
-
-## Coverage Summary
-
-| Package | Tests | Notes |
-|---------|-------|-------|
-| `internal/api` | `errors_test.go`, `middleware_test.go` | CORS, rate limiter, panic recovery, cookie writing, error wrapping |
-| `internal/config` | `loader_test.go` | File load, env override, legacy env, validation failure |
-| `internal/redis` | `redis_test.go` | Enqueue, dequeue, delayed promote, dead letter |
-| `internal/smtp` | `smtp_test.go` | LOGIN SASL server, auth mechanism list |
-| `internal/webhook` | `webhook_test.go` | Deduplication (new, duplicate, no MessageID, TTL eviction) |
-| `internal/webmail` | `webmail_test.go` | Create draft, update draft (handler-level) |
-| `internal/workers` | `workers_test.go` | Job UUID generation, retry/dead-letter, delayed promotion |
-
-**Untested packages** (as of this analysis):
-- `internal/auth` — no `auth_test.go`; session/crypto logic is exercised only via integration.
-- `internal/mailstore` — `PGStore` has no dedicated tests; covered indirectly via `webmail_test.go` mocks.
-- `internal/models` — no `models_test.go`.
-- `cmd/server` and `cmd/worker` — no main-level tests.
-
-## Patterns to Follow
-
-1. **Keep tests in the same package** unless an external (black-box) test is specifically needed.
-2. **Use `t.TempDir()` and `t.Setenv()`** for filesystem and environment tests.
-3. **Write hand-rolled mocks** when the interface surface is small; keep them in the `_test.go` file.
-4. **Use `httptest` for HTTP units** and inject `chi` route context manually when URL params are required.
-5. **Use `miniredis` for Redis units** and leverage `FastForward` to avoid real-time sleeps.
-6. **Control time via dependency injection** (e.g. `nowFunc`) rather than sleeping in tests when possible.
-7. **Prefer `t.Errorf` for assertions** and `t.Fatalf` for setup errors.
-8. **Name tests after the scenario** (`Test<Subject>_<State>_<Expected>`) so failures are self-describing.
-
-## Anti-Patterns to Avoid
-
-- Do not add `testify` or another assertion library without a team decision; the current suite is intentionally dependency-light.
-- Do not write table-driven tests without a clear reason; the existing suite uses linear tests because most cases have distinct setup requirements.
-- Avoid real `time.Sleep` in tests when `miniredis.FastForward` or injected clocks can achieve the same result.
-- Do not share mutable mock state between tests; always return fresh instances from setup helpers.
+- Each test gets its own `miniredis` instance.
+- File-system tests use `t.TempDir()`.
+- Environment variable tests use `t.Setenv()`.
+- HTTP tests share no mutable global state; all state is in the injected mocks.

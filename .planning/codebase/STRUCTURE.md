@@ -1,191 +1,112 @@
-# PostNest Directory Structure
+# Postnest Directory Structure
 
-## Layout
+## Root Layout
 
 ```
 .
-├── cmd/
-│   ├── migrate/main.go       # Database migration CLI entrypoint
-│   ├── server/main.go        # HTTP + IMAP + SMTP + DAV server entrypoint
-│   └── worker/main.go        # Background worker pool entrypoint
-│
-├── internal/
-│   ├── api/
-│   │   ├── errors.go           # AppError, sentinel errors, WriteError
-│   │   ├── errors_test.go      # Error wrapping tests
-│   │   ├── middleware.go       # RequestID, logger, recovery, CORS, auth, rate limit
-│   │   └── middleware_test.go  # Middleware unit tests
-│   │
-│   ├── auth/
-│   │   └── auth.go             # Argon2id, sessions, API keys, user/domain helpers
-│   │
-│   ├── certmanager/
-│   │   └── manager.go          # ACME certificate lifecycle (lego + Cloudflare)
-│   │
-│   ├── config/
-│   │   ├── config.go           # Config struct definition
-│   │   ├── loader.go           # TOML + env override loader with validation
-│   │   ├── loader_test.go      # Config loader tests
-│   │   └── template.go         # PrintTemplate for generating sample TOML
-│   │
-│   ├── contacts/
-│   │   └── contacts.go         # Store interface + PGStore implementation
-│   │
-│   ├── dav/
-│   │   └── dav.go              # CardDAV/CalDAV handler + backends
-│   │
-│   ├── db/
-│   │   └── db.go               # pgxpool wrapper with ping lifecycle
-│   │
-│   ├── imap/
-│   │   ├── backend.go          # IMAP backend: user, mailbox, message ops
-│   │   └── imap.go             # Server wrapper (go-imap)
-│   │
-│   ├── logger/
-│   │   └── logger.go           # slog JSON handler factory
-│   │
-│   ├── mailstore/
-│   │   ├── mailstore.go        # Store interface (canonical contract)
-│   │   └── pgstore.go          # PostgreSQL implementation
-│   │
-│   ├── migrate/
-│   │   ├── migrate.go          # Embedded migration runner (golang-migrate)
-│   │   └── migrations/
-│   │       ├── 000001_init.up.sql
-│   │       ├── 000002_fts.up.sql
-│   │       ├── 000003_seed_labels.up.sql
-│   │       ├── 000004_fts_trigger.up.sql
-│   │       └── 000005_search_composite.up.sql
-│   │
-│   ├── models/
-│   │   └── models.go           # Pure data structs (User, Message, Label, Thread, etc.)
-│   │
-│   ├── postmark/
-│   │   └── postmark.go         # Postmark client wrapper + inbound structs
-│   │
-│   ├── redis/
-│   │   ├── redis.go            # Redis client wrapper + queue helpers
-│   │   └── redis_test.go       # Redis helper tests
-│   │
-│   ├── reputation/
-│   │   └── reputation.go       # Whitelist/blacklist/greylist engine
-│   │
-│   ├── search/
-│   │   └── search.go           # PostgreSQL tsvector indexer helpers
-│   │
-│   ├── smtp/
-│   │   ├── smtp.go             # SMTP server wrapper + session backend
-│   │   └── smtp_test.go        # SMTP tests
-│   │
-│   ├── webhook/
-│   │   ├── webhook.go          # Postmark webhook receiver + dedup + enqueue
-│   │   └── webhook_test.go     # Webhook handler tests
-│   │
-│   ├── webmail/
-│   │   ├── webmail.go          # REST API handlers (labels, messages, drafts, search)
-│   │   └── webmail_test.go     # Webmail handler tests
-│   │
-│   └── workers/
-│       ├── bounce.go           # Bounce job processor
-│       ├── delivery.go           # Delivery confirmation processor
-│       ├── inbound.go            # Inbound mail processor
-│       ├── send.go               # Draft send processor
-│       ├── workers.go            # Pool, Job, Processor definitions
-│       └── workers_test.go       # Worker pool tests
-│
-├── design/
-│   ├── ARCHITECTURE.md           # Original design architecture
-│   ├── API-SPEC.md               # REST endpoint specification
-│   ├── COMPONENT-DESIGN.md       # Package layout design doc
-│   ├── DATABASE-SCHEMA.md        # Schema design document
-│   ├── DEPLOYMENT-ARCHITECTURE.md # Deployment specs
-│   ├── DESIGN-SUMMARY.md         # Executive design summary
-│   ├── PROTOCOL-DESIGN.md        # IMAP/SMTP/DAV protocol details
-│   └── REQUIREMENTS-DEPLOYMENT.md # Deployment requirements
-│
-├── docs/                         # Additional documentation
-│
-├── nix/
-│   └── (flake.nix at root)       # Nix flake + NixOS module
-│
-├── scripts/
-│   ├── install-docker.sh         # Docker Compose deployment script
-│   └── install-systemd.sh        # systemd service installation script
-│
-├── Dockerfile.migrate            # Migration runner image
-├── Dockerfile.server             # Server image
-├── Dockerfile.worker             # Worker image
-├── docker-compose.yml            # Full stack compose (postgres, redis, server, worker, migrate)
-├── go.mod                        # Module definition (Go 1.25)
-├── go.sum                        # Checksums
-├── flake.nix                     # Nix flake entrypoint
-└── README.md                     # Project README
+├── cmd/                    # Application entry points
+│   ├── server/
+│   │   └── main.go         # HTTP + IMAP + SMTP + DAV server
+│   └── worker/
+│       └── main.go         # Background job worker pool
+├── internal/               # Private application code
+│   ├── api/                # HTTP middleware and shared API helpers
+│   ├── auth/               # Authentication and session service
+│   ├── certmanager/        # ACME TLS certificate lifecycle
+│   ├── config/             # Configuration loader (TOML + env)
+│   ├── contacts/           # Contact storage interface + PG implementation
+│   ├── dav/                # CardDAV/CalDAV HTTP handler and backends
+│   ├── db/                 # PostgreSQL connection pool wrapper
+│   ├── imap/               # IMAP server and backend implementation
+│   ├── logger/             # Structured JSON logger factory
+│   ├── mailstore/          # Mail storage interface + PG implementation
+│   ├── migrate/            # Database migrations (embedded SQL)
+│   ├── models/             # Canonical domain structs
+│   ├── postmark/           # Postmark API client and inbound payload parsing
+│   ├── redis/              # Redis client wrapper + queue helpers
+│   ├── reputation/         # Spam/reputation engine
+│   ├── search/             # Full-text search indexer
+│   ├── smtp/               # SMTP server and backend implementation
+│   ├── webhook/            # Postmark webhook handlers
+│   ├── webmail/            # REST API handlers for webmail
+│   └── workers/            # Job queue pool and processors
+├── docs/                     # Documentation
+├── scripts/                  # Build / utility scripts
+├── design/                   # Design documents
+├── docker-compose.yml        # Local infrastructure stack
+├── Dockerfile.server          # Server container image
+├── Dockerfile.worker          # Worker container image
+├── Dockerfile.migrate         # Migration container image
+├── go.mod / go.sum           # Go module definition
+├── flake.nix                 # Nix development shell
+├── README.md
+├── AGENTS.md
+├── INTEGRATION.md
+└── PLAN.md
 ```
 
----
+## Key Locations
+
+### Entry Points
+- `cmd/server/main.go` — Initializes all server subsystems (HTTP, IMAP, SMTP, DAV) and handles graceful shutdown.
+- `cmd/worker/main.go` — Initializes the Redis-backed worker pool and registers job processors.
+
+### Configuration
+- `internal/config/config.go` — The unified `Config` struct used throughout the application.
+- `internal/config/loader.go` — TOML file parser + environment variable override logic.
+- `internal/config/template.go` — (if present) Default configuration template generation.
+
+### Domain Models
+- `internal/models/models.go` — All domain structs: `User`, `Domain`, `Message`, `Label`, `Attachment`, `Thread`, `Contact`, `DeliveryLog`, `AuthSession`.
+
+### Storage Layer
+- `internal/mailstore/mailstore.go` — `Store` interface: the contract for all mail persistence.
+- `internal/mailstore/pgstore.go` — `PGStore` implementation using raw `pgx` SQL.
+- `internal/contacts/contacts.go` — `Store` interface and `PGStore` for contacts.
+- `internal/db/db.go` — Thin `Pool` wrapper around `pgxpool.Pool` with lifecycle helpers.
+
+### HTTP Layer
+- `internal/api/middleware.go` — `RequestID`, `StructuredLogger`, `Recovery`, `CORS`, `RequireSession`, `RequireDomainAdmin`, `RateLimiter`.
+- `internal/api/errors.go` — Unified `AppError` type and JSON error writer.
+- `internal/webmail/webmail.go` — REST handlers for labels, messages, threads, drafts, search.
+- `internal/webhook/webhook.go` — Postmark inbound/bounce/delivery/spam webhook receivers.
+- `internal/dav/dav.go` — CardDAV (implemented) and CalDAV (stub) HTTP handler with Basic Auth middleware.
+
+### Mail Protocols
+- `internal/imap/imap.go` — IMAP server wrapper (`go-imap`).
+- `internal/imap/backend.go` — IMAP backend: login, mailbox listing, message fetch, flags, search, copy, expunge.
+- `internal/smtp/smtp.go` — SMTP server wrapper (`go-smtp`) with PLAIN and LOGIN SASL.
+
+### Workers
+- `internal/workers/workers.go` — `Pool`, `Job`, and `Processor` interfaces; Redis queue operations.
+- `internal/workers/inbound.go` — Processes Postmark inbound payloads.
+- `internal/workers/send.go` — Sends draft messages via Postmark.
+- `internal/workers/bounce.go` — Records bounce events in `delivery_logs`.
+- `internal/workers/delivery.go` — Records delivery confirmations.
+- `internal/workers/spam.go` — Processes spam complaints.
+
+### Infrastructure Clients
+- `internal/postmark/postmark.go` — Outbound send wrapper and inbound payload parsing.
+- `internal/redis/redis.go` — Redis list/sorted-set queue primitives (`Enqueue`, `Dequeue`, `PromoteReadyDelayed`, `EnqueueDead`).
+- `internal/certmanager/manager.go` — ACME account management, certificate obtainment, and background renewal.
+- `internal/logger/logger.go` — JSON `slog` factory.
+
+### Migration Files
+- `internal/migrate/migrate.go` — Migration runner using `golang-migrate/migrate` with embedded SQL.
+- `internal/migrate/migrations/000001_init.up.sql`
+- `internal/migrate/migrations/000002_fts.up.sql`
+- `internal/migrate/migrations/000003_seed_labels.up.sql`
+- `internal/migrate/migrations/000004_fts_trigger.up.sql`
+- `internal/migrate/migrations/000005_search_composite.up.sql`
 
 ## Naming Conventions
 
-### Packages
-- Single-word, lowercase, descriptive of domain responsibility (`mailstore`, `webmail`, `certmanager`)
-- No `pkg/` or `lib/` prefixes; everything lives under `internal/`
-
-### Files
-- `foo.go` — primary implementation
-- `foo_test.go` — corresponding tests
-- `migrations/NNNNNN_description.up.sql` — golang-migrate sequential numbering
-
-### Types
-- **Interfaces**: noun describing capability (`Store`, `Processor`, `DomainLister`)
-- **Implementations**: `PG` + interface name (`PGStore`, `PGStore` for contacts)
-- **Handlers**: `Handler` struct with `RegisterRoutes(r chi.Router)` method
-- **Services**: `Service` struct with constructor `NewService(...)`
-- **Servers**: `Server` struct with `Start() error` and `Stop() error`
-
-### Functions
-- Constructors: `New<Thing>(...)`
-- HTTP handlers: lowercase verb-noun (`listLabels`, `getMessage`, `sendDraft`)
-- Middleware factories: `Require<Thing>(svc)` returning `func(http.Handler) http.Handler`
-
-### Variables
-- Config struct fields use Go tags with `env:` and `envDefault:`
-- Context keys: unexported `ctxKey` string type to avoid collisions
-- Redis queue names: exported constants in `workers.go`
-
----
-
-## Key File-to-Responsibility Map
-
-| Concern | Primary File |
-|---------|-------------|
-| HTTP routing & middleware | `internal/api/middleware.go` |
-| REST API (labels, messages, drafts, search) | `internal/webmail/webmail.go` |
-| Webhook receiver (inbound, bounce, delivery, spam) | `internal/webhook/webhook.go` |
-| IMAP protocol adapter | `internal/imap/backend.go` |
-| SMTP protocol adapter | `internal/smtp/smtp.go` |
-| CardDAV/CalDAV adapter | `internal/dav/dav.go` |
-| Mail persistence interface | `internal/mailstore/mailstore.go` |
-| Mail persistence implementation | `internal/mailstore/pgstore.go` |
-| Auth (passwords, sessions, API keys) | `internal/auth/auth.go` |
-| Background job pool | `internal/workers/workers.go` |
-| Postmark client | `internal/postmark/postmark.go` |
-| Config loading (TOML + env) | `internal/config/loader.go` |
-| Database pool | `internal/db/db.go` |
-| Redis client + queue ops | `internal/redis/redis.go` |
-| ACME certificate manager | `internal/certmanager/manager.go` |
-| Data models (structs) | `internal/models/models.go` |
-| Migration runner | `internal/migrate/migrate.go` |
-
----
-
-## Test Coverage Summary
-
-| Package | Test Files |
-|---------|-----------|
-| `internal/api` | `errors_test.go`, `middleware_test.go` |
-| `internal/config` | `loader_test.go` |
-| `internal/redis` | `redis_test.go` |
-| `internal/smtp` | `smtp_test.go` |
-| `internal/webhook` | `webhook_test.go` |
-| `internal/webmail` | `webmail_test.go` |
-| `internal/workers` | `workers_test.go` |
+- **Packages**: lowercase, no underscores (`mailstore`, `certmanager`).
+- **Files**: lowercase with underscore separators (`pgstore.go`, `middleware_test.go`).
+- **Interfaces**: Noun describing behavior (`Store`, `Processor`, `DomainLister`).
+- **Implementations**: Prefix with technology (`PGStore`, `InboundProcessor`).
+- **Constructors**: `New` or `New<T>` (`NewPool`, `NewInboundProcessor`).
+- **Errors**: Package-level exported vars for common cases (`ErrNotFound`, `ErrUnauthorized`).
+- **Context keys**: Unexported string type to avoid collisions (`ctxKeyUser`).
+- **Test files**: `*_test.go` adjacent to the code under test.
+- **Config env vars**: `POSTNEST_<SECTION>_<KEY>` (e.g., `POSTNEST_DATABASE_DSN`), with legacy fallback support.

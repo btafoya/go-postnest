@@ -1,135 +1,131 @@
 # Code Conventions
 
-This document captures the coding style, naming rules, architectural patterns, error handling, and interface design used across the Postnest Go codebase.
+## Language & Tooling
 
-## Language & Formatting
+- **Go 1.25** (`go 1.25.0` in `go.mod`).
+- Standard toolchain only; no `testify`, `gomock`, or code-generation frameworks in use.
+- `go fmt` is the implied formatter (no custom `gofmt` rules).
 
-- **Go 1.25** — the module pins `go 1.25.0`.
-- Standard `gofmt` formatting is assumed; no custom style overrides are visible.
-- Imports are grouped in three blocks: stdlib, third-party, internal packages.
-- File names are lowercase snake_case (e.g. `errors.go`, `middleware_test.go`, `pgstore.go`).
+## Package Structure
+
+- Packages are grouped by **domain boundary**, not by layer:
+  - `internal/api` — HTTP middleware and shared API primitives.
+  - `internal/auth` — Authentication service.
+  - `internal/redis` — Redis client wrapper.
+  - `internal/workers` — Background job pool.
+  - `internal/webmail` — REST API handlers for the webmail UI.
+  - `internal/webhook` — Inbound webhook handlers.
+  - `internal/smtp` — SMTP server.
+  - `internal/mailstore` — Persistence interface.
+  - `internal/models` — Canonical domain structs.
+- `cmd/` contains runnable binaries (`server`, `worker`, `migrate`).
+- `internal/config` holds the unified configuration loader.
 
 ## Naming
 
-| Category | Rule | Example |
-|----------|------|---------|
-| Package | Matches directory name, short and singular | `package api`, `package mailstore` |
-| Exported type | PascalCase | `AppError`, `RateLimiter`, `PGStore` |
-| Interface | Noun / capability name | `Processor`, `DomainLister`, `Store` |
-| Constructor | `New<Name>` | `NewPool`, `NewHandler`, `NewPGStore` |
-| Exported func / method | PascalCase | `WriteError`, `RequireSession` |
-| Unexported helper | camelCase, starts lower | `extractToken`, `isClosedErr`, `toScreamingSnakeCase` |
-| Variable / const | camelCase / PascalCase depending on export | `ctxKeyUser`, `queueJobs`, `ErrNotFound` |
-| Error sentinel | `Err<Name>` | `ErrUnauthorized`, `ErrRateLimited` |
-| Test helper | `setup<TestSubject>` or `newTestHandler` | `setupTestRedis`, `newTestHandler` |
+| Kind | Rule |
+|------|------|
+| Exported identifiers | PascalCase (`AppError`, `WriteError`) |
+| Unexported identifiers | camelCase (`extractToken`, `ctxKeyUser`) |
+| Constructor functions | `New{Type}` (`NewPool`, `NewHandler`) |
+| Interface names | Noun describing capability (`Processor`, `DomainLister`, `Store`) |
+| Implementation types | Descriptive noun (`smtpBackend`, `smtpSession`, `testProcessor`) |
+| Error variables | `Err{Name}` (`ErrNotFound`, `ErrUnauthorized`) |
+| Context keys | Custom string type `ctxKey` + `const` (`ctxKeyUser ctxKey = "user"`) |
 
-## Structs & Models
+## Imports
 
-- Models live in `internal/models` and are plain structs with exported fields. No ORM tags are used; fields are scanned manually with `pgx`.
-- ID fields are `github.com/google/uuid` (`uuid.UUID`).
-- Timestamps are `time.Time` and are set to `time.Now().UTC()` before persistence.
-- Nullable foreign keys use pointers (e.g. `ThreadID *uuid.UUID`).
-- Other slices use value types (e.g. `ToAddresses []string`).
-- Handler structs hold their dependencies explicitly:
-  ```go
-  type Handler struct {
-      store mailstore.Store
-      auth  DomainLister
-      redis *redis.Client
-  }
-  ```
-- Configuration is loaded via `internal/config.Loader` which reads a TOML file and applies `POSTNEST_<SECTION>_<KEY>` environment overrides, with legacy fallback names.
+- Grouped by: stdlib → third-party → internal.
+- Aliases are used only to avoid collisions or clarify origin:
+  - `goredis "github.com/redis/go-redis/v9"`
+  - `gomail "github.com/emersion/go-message/mail"`
 
 ## Error Handling
 
-- The unified application error type is `*AppError` (`internal/api/errors.go`):
-  ```go
-  type AppError struct {
-      Code       string      `json:"code"`
-      Message    string      `json:"message"`
-      Details    []FieldError `json:"details,omitempty"`
-      StatusCode int         `json:"-"`
-      Err        error       `json:"-"`
-  }
-  ```
-- Sentinel errors are pre-declared package variables:
-  ```go
-  var ErrNotFound = &AppError{Code: "not_found", ...}
-  ```
-- Wrapping is done with `fmt.Errorf("...: %w", err)`.
-- `api.As` is a thin wrapper over `errors.As` for unwrapping `*AppError`.
-- Validation failures are built with `NewValidationError([]FieldError{...})`.
-- HTTP responses use `api.WriteError(w, err)`, which falls back to `ErrInternal` if the error is not an `*AppError`.
+### Unified Application Error Type
 
-## Interfaces & Dependency Injection
+All HTTP-facing errors flow through `internal/api.AppError`:
 
-- Large interfaces are avoided where possible. `mailstore.Store` is the canonical broad interface (≈25 methods), but tests show that callers often depend on narrower interfaces (e.g. `DomainLister` with a single method).
-- Dependency injection is manual: constructors accept concrete or interface types, and wire-up happens in `cmd/server/main.go` and `cmd/worker/main.go`.
-- There is no DI container or code generation for mocks.
+```go
+type AppError struct {
+    Code       string      `json:"code"`
+    Message    string      `json:"message"`
+    Details    []FieldError `json:"details,omitempty"`
+    StatusCode int         `json:"-"`
+    Err        error       `json:"-"`
+}
+```
 
-## HTTP Layer
+- `Code` is a machine-readable slug (e.g., `"not_found"`, `"validation_failed"`).
+- `StatusCode` maps to the HTTP status code returned by `WriteError`.
+- Sentinel error values are declared as package-level variables (`var ErrNotFound = &AppError{...}`).
 
-- Router: `github.com/go-chi/chi/v5`.
-- Middleware returns `func(http.Handler) http.Handler` or is a method on a struct (`RateLimiter.Handler`).
-- Context values are stored using typed string keys (`type ctxKey string`) to avoid collisions:
-  ```go
-  const ctxKeyUser ctxKey = "user"
-  ```
-- Helpers expose read/write access to context values:
-  ```go
-  func WithUser(ctx context.Context, user *models.User) context.Context
-  func UserFromContext(ctx context.Context) *models.User
-  ```
-- JSON output uses a small helper `writeJSON` (defined in `cmd/server/main.go`) or `api.WriteError`.
-- Status codes are the standard `http.Status*` constants.
+### Error Translation
 
-## Database Access
+- Handlers **do not** leak raw database or library errors to the client.
+- `WriteError` unwraps wrapped errors with `errors.As`; if the error is not an `*AppError`, it falls back to `ErrInternal`.
+- `api.As` is a thin wrapper around `errors.As` to keep the `api` package self-contained.
 
-- Driver: `github.com/jackc/pgx/v5` via `pgxpool.Pool`.
-- Queries are hand-written SQL with positional parameters (`$1`, `$2`, …).
-- Transactions follow the standard `Begin → defer Rollback → Commit` pattern:
-  ```go
-  tx, err := s.pool.Begin(ctx)
-  if err != nil { return err }
-  defer tx.Rollback(ctx)
-  // ... work ...
-  return tx.Commit(ctx)
-  ```
-- Row scanning is explicit; `pgx.ErrNoRows` is checked for “not found” cases.
+### Validation
+
+- Validation errors are built with `NewValidationError([]FieldError{...})`.
+- Each `FieldError` names the field, the issue type, and an optional param.
+
+## Interface Design
+
+- **Keep interfaces small** when they describe a capability (`DomainLister` has one method).
+- **Keep interfaces large** when they describe a bounded context (`mailstore.Store` has ~25 methods). Both patterns coexist; the large interface lives in the consumer package (`mailstore`) and is implemented by the concrete persistence layer.
+- Handlers depend on interfaces, not concrete stores (`mailstore.Store`, `DomainLister`).
+
+## Struct Tags & Encoding
+
+- JSON tags use `camelCase` with `omitempty` for optional slices.
+- TOML tags use `snake_case` for config structs.
+- `env` tags are used in the legacy `Config` struct (transitioning to TOML + env overrides).
+
+## HTTP Middleware
+
+- Middleware is written as **higher-order functions** that return `func(http.Handler) http.Handler`.
+- Middleware that needs configuration (e.g., `CORS`, `StructuredLogger`, `RequireSession`) accepts dependencies in the outer closure.
+- `chi/v5` is the router.
+
+## Context Usage
+
+- `context.Context` is passed explicitly through all service and store methods.
+- Request-scoped values (user, domain ID, request ID) are stored via `context.WithValue` using typed string keys (not bare strings).
+- `WithUser`, `UserFromContext`, `DomainIDFromContext`, `RequestIDFromContext` provide typed accessors.
 
 ## Logging
 
-- `log/slog` is used everywhere.
-- Key-value logging style: `logger.Info("request", "method", r.Method, "path", r.URL.Path, ...)`.
-- Panic recovery logs the stack via `string(debug.Stack())`.
+- Standard library `log/slog` only.
+- Structured key-value logging: `logger.Info("request", "method", r.Method, "path", r.URL.Path)`.
+- Errors are logged at `Error` level; panics are recovered by the `Recovery` middleware and logged with the stack trace.
+
+## UUIDs
+
+- `github.com/google/uuid` is the UUID library.
+- V7 UUIDs are generated for new entities: `uuid.Must(uuid.NewV7())`.
+- `uuid.Nil` is the zero value sentinel.
+
+## Database Access
+
+- `pgx/v5` pool for PostgreSQL.
+- Raw SQL via `pool.QueryRow`, `pool.Query`, `pool.Exec`.
+- Transactions are used explicitly (`tx, err := s.pool.Begin(ctx)`); `defer tx.Rollback(ctx)` is the standard pattern.
+- `pgx.ErrNoRows` is checked to convert to domain errors.
+
+## Security Patterns
+
+- **Password hashing**: Argon2id with per-user salt; custom encoding (`base64.RawStdEncoding`) joined by `$`.
+- **Token storage**: SHA-256 hash of the raw token is stored; raw token is returned once on creation.
+- **Constant-time comparison**: Hand-rolled `constantTimeCompare` for hash verification.
+- **Session cookies**: `HttpOnly`, `Secure` (configurable), `SameSite=Lax`, 7-day expiry.
+- **Rate limiting**: In-memory token bucket per IP with periodic stale-entry cleanup.
 
 ## Configuration
 
-- `internal/config.Loader` reads a TOML file (`/etc/postnest/postnest.conf` by default) into a `rawConfig` struct, then translates it to the flat `Config` struct.
-- Environment overrides are applied reflectively: `POSTNEST_<SECTION>_<KEY>`.
-- Legacy environment variable names are mapped for backward compatibility (e.g. `POSTGRES_DSN` → `POSTNEST_DATABASE_DSN`).
-- Validation is performed after merging; missing required fields produce an aggregated error string.
-
-## Security & Cryptography
-
-- Password hashing uses Argon2id with configurable time, memory, and thread parameters.
-- Session and API tokens are random 32-byte values, base64-encoded for transport, SHA-256 hashed for storage.
-- A constant-time byte comparison helper (`constantTimeCompare`) is used for password verification.
-- Cookies are `HttpOnly`, `Secure` (when TLS is enabled), `SameSite=Lax`, 7-day MaxAge.
-- Rate limiting is a simple in-memory per-IP token bucket protected by `sync.Mutex`.
-
-## Concurrency
-
-- Worker pool (`internal/workers.Pool`) spawns goroutines based on a configurable concurrency level.
-- Graceful shutdown uses `sync.WaitGroup` and context cancellation.
-- Redis-backed queues (`LPush`, `BRPop`, `ZAdd`) are used for job distribution.
-
-## Context
-
-- `context.Context` is always the first parameter in functions that need it.
-- Timeouts are created inline when crossing process boundaries (e.g. `context.WithTimeout(r.Context(), 5*time.Second)`).
-
-## Testing Helpers
-
-- `api.WithUser` is explicitly documented as being used by tests and middleware to inject a user into a context.
-- Handler tests manually construct `chi.RouteContext` and inject it into the request context when URL parameters are required (`webmail_test.go`).
+- TOML file (`postnest.conf`) with environment variable overrides.
+- Env var naming: `POSTNEST_<SECTION>_<KEY>` in `SCREAMING_SNAKE_CASE`.
+- Legacy env vars are mapped for backward compatibility.
+- `Loader` uses reflection to walk the raw config struct and apply overrides.
+- Validation is explicit: collect missing fields into a slice and return a single formatted error.
