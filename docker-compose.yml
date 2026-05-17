@@ -88,6 +88,7 @@ services:
       dockerfile: Dockerfile.migrate
     environment:
       POSTNEST_DATABASE_DSN: "postgres://postnest:${POSTNEST_DATABASE_PASSWORD:-changeme}@postgres:5432/postnest?sslmode=disable"
+      POSTNEST_SECURITY_SESSION_KEY: ${POSTNEST_SECURITY_SESSION_KEY}
     depends_on:
       postgres:
         condition: service_healthy
