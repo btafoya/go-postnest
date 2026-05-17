@@ -1,135 +1,426 @@
-# Coding Conventions
+# Postnest Code Conventions
 
-**Analysis Date:** 2026-05-17
+## Module & Language Versions
 
-## Naming Patterns
+- **Module**: `github.com/go-postnest/postnest`
+- **Go**: `1.25.0` (`go.mod`)
+- **Frontend**: React `19.0.0`, Vite `6.0.0`, React Router DOM `7.0.0`, Tailwind CSS `3.4.15`
 
-**Files:**
-- Descriptive lowercase names for Go source files (auth.go, middleware.go, pgstore.go)
-- `*_test.go` alongside source files in the same package
-- Package directories use lowercase, single-word names when possible (redis, smtp, webhook)
+## Repository Layout
 
-**Functions:**
-- Exported: PascalCase (Authenticate, CreateSession, NewPool)
-- Unexported: camelCase (hashPassword, verifyPassword, extractToken)
-- Constructors: `New` or `New<Type>` (NewService, NewPool, NewPGStore, NewHandler)
-- Middleware constructors: named after behavior (CORS, Recovery, RequestID)
-- HTTP handlers: unexported methods on handler structs (handleInbound, createDraft, updateDraft)
+```
+cmd/<binary>/main.go          # one main per binary: server, worker, migrate, admin, webui
+internal/<package>/           # flat internal packages; no further sub-packages
+  *.go                        # implementation files
+  *_test.go                   # test files co-located with code
+web/                          # Vite + React frontend
+  src/
+    api.js                    # single axios client exporting API functions
+    components/*.jsx            # React functional components
+    sse.js                    # ES6 SSE client class
+    styles/index.css           # Tailwind directives + custom layers
+```
 
-**Variables:**
-- camelCase for local variables
-- Short names accepted in tight scopes (s for store, tx for transaction, ctx for context)
-- Package-level constants: normal camelCase or PascalCase
-- No ALL_CAPS constants observed
+## Go Code Style
 
-**Types:**
-- Exported structs: PascalCase (User, Domain, Message, Config)
-- Interfaces: PascalCase, defined in consumer packages (Store, Processor)
-- Custom types for context keys: `type ctxKey string` with const declarations
-- Options structs: PascalCase with Options or Patch suffix (ListOptions, SearchOptions, MessagePatch)
+### Imports
+Standard library imports come first, followed by a blank line, then third-party imports. Group the project’s own imports last.
 
-## Code Style
+```go
+import (
+	"context"
+	"fmt"
+	"time"
 
-**Formatting:**
-- Standard gofmt (no custom formatter configured)
-- Tab indentation (Go default)
-- No explicit line length limit; keep readable
-- Go version 1.25.0
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
-**Linting:**
-- No golangci-lint or custom lint config detected
-- Relies on `go vet` and `go build` for static analysis
+	"github.com/go-postnest/postnest/internal/api"
+	"github.com/go-postnest/postnest/internal/models"
+)
+```
 
-## Import Organization
+### Naming
 
-**Order:**
-1. Standard library packages
-2. Third-party packages (github.com/emersion/*, github.com/jackc/*, etc.)
-3. Internal packages (github.com/go-postnest/postnest/internal/*)
+| Construct | Convention | Example |
+|---|---|---|
+| Exported types/functions | PascalCase | `type Service struct`, `NewServer(...)` |
+| Unexported helpers | camelCase | `hashPassword`, `extractToken` |
+| Constructor functions | `New<T>` | `NewService`, `NewPGStore`, `NewHandler` |
+| Interface names | Noun ending in `-er` or role name | `Store`, `Processor`, `DomainLister` |
+| Test files | `<file>_test.go` | `errors_test.go` |
+| Context param | `ctx context.Context` | always first parameter |
+| HTTP request/response | `r *http.Request`, `w http.ResponseWriter` | standard Go idiom |
+| Error sentinel variables | `Err<Name>` | `ErrNotFound` |
+| Acronyms | All-caps in names | `TLSConfig`, `SMTPAddr`, `IMAPAddr` |
 
-**Grouping:**
-- Single blank line between each group
-- No blank line within a group
-- No import aliases unless required for disambiguation (e.g., goredis for go-redis in tests)
+### Struct Tags
+Use struct tags for JSON serialization, TOML config mapping, and database scan mapping where applicable:
 
-**Path Aliases:**
-- No custom module path aliases; all imports use full module path
+```go
+type rawServer struct {
+    HTTPAddr     string        `toml:"http_addr"`
+    ReadTimeout  time.Duration `toml:"read_timeout"`
+}
+```
+
+### Constants
+Group related constants in `const` blocks. Prefer typed string constants for enum-like values.
+
+```go
+const (
+    queueJobs    = "postnest:jobs"
+    queueDelayed = "postnest:delayed"
+    queueDead    = "postnest:dead"
+)
+```
+
+### Context Keys
+Define a custom string type for context keys to avoid collisions with other packages:
+
+```go
+// `internal/api/middleware.go`
+type ctxKey string
+
+const (
+    ctxKeyUser      ctxKey = "user"
+    ctxKeyDomainID  ctxKey = "domain_id"
+    ctxKeyRequestID ctxKey = "request_id"
+)
+```
+
+### Time Handling
+Always store and compare times in UTC:
+
+```go
+user.CreatedAt = time.Now().UTC()
+```
+
+### ID Generation
+Use UUID v7 via `github.com/google/uuid`:
+
+```go
+id := uuid.Must(uuid.NewV7())
+```
 
 ## Error Handling
 
-**Patterns:**
-- Custom application error type: `AppError` with Code, Message, Details, StatusCode, Err fields
-- Sentinel errors as package-level vars (ErrNotFound, ErrUnauthorized, ErrValidation, etc.)
-- Wrap errors with `fmt.Errorf("...: %w", err)` at service boundaries
-- Database-specific: check `pgx.ErrNoRows` and map to domain errors
-- Panics recovered at HTTP middleware boundary (`Recovery` middleware logs and returns 500)
+### Application Error Type
+The project defines a unified error type in `internal/api/errors.go`:
 
-**Error Types:**
-- Validation errors carry `[]FieldError` with Field, Issue, Param
-- Use `api.As(err, &target)` wrapper around `errors.As`
-- Return errors; do not log-and-swallow in low-level functions
+```go
+// AppError is the unified application error type.
+type AppError struct {
+    Code       string      `json:"code"`
+    Message    string      `json:"message"`
+    Details    []FieldError `json:"details,omitempty"`
+    StatusCode int         `json:"-"`
+    Err        error       `json:"-"`
+}
+```
+
+Common sentinel errors are declared as package variables:
+
+```go
+var (
+    ErrNotFound     = &AppError{Code: "not_found", ...}
+    ErrUnauthorized = &AppError{Code: "unauthorized", ...}
+    ErrForbidden    = &AppError{Code: "forbidden", ...}
+    ErrValidation   = &AppError{Code: "validation_failed", ...}
+)
+```
+
+### Writing JSON Errors
+All HTTP error responses go through `api.WriteError`, which serializes the `AppError` to JSON and sets the correct status code:
+
+```go
+func WriteError(w http.ResponseWriter, err error) {
+    var appErr *AppError
+    if !As(err, &appErr) {
+        appErr = ErrInternal
+    }
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(appErr.StatusCode)
+    _ = json.NewEncoder(w).Encode(map[string]any{"error": appErr})
+}
+```
+
+### Wrapping and Matching
+The project wraps standard errors and matches with `errors.As` via a thin helper:
+
+```go
+func As(err error, target any) bool {
+    return errors.As(err, target)
+}
+```
+
+Example usage in tests and middleware:
+
+```go
+wrapped := fmt.Errorf("wrapped: %w", ErrNotFound)
+var target *AppError
+if As(wrapped, &target) { ... }
+```
+
+### Database Errors
+Database queries return raw `pgx` errors. `pgx.ErrNoRows` is checked explicitly to translate into application-level errors rather than leaking driver details:
+
+```go
+if err := row.Scan(&u.ID, ...); err != nil {
+    if err == pgx.ErrNoRows {
+        return nil, fmt.Errorf("invalid credentials")
+    }
+    return nil, err
+}
+```
 
 ## Logging
 
-**Framework:**
-- Standard library `log/slog` with JSON handler
-- `slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))`
+### Logger Setup
+The project uses `log/slog` with a structured JSON handler configured in `internal/logger/logger.go`:
 
-**Patterns:**
-- Structured key-value pairs: `logger.Info("request", "method", r.Method, "path", r.URL.Path)`
-- Log at service boundaries (HTTP requests, job processing, server startup/shutdown)
-- No `fmt.Println` or `log.Println` in production code
-- Error level for failures: `logger.Error("dequeue error", "error", err)`
-- Warn level for recoverable issues: `logger.Warn("no processor for job type", "type", job.Type)`
+```go
+func New() *slog.Logger {
+    return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+        Level: slog.LevelInfo,
+    }))
+}
+```
 
-## Comments
+### Logging Patterns
+- Pass `*slog.Logger` as a constructor dependency rather than using the global default.
+- Log with structured key-value pairs, not string interpolation.
+- Log errors at `Error` level; startup events at `Info` level; TLS downgrade warnings at `Warn` level.
 
-**When to Comment:**
-- Package-level comments for exported types and functions
-- Explain "why" for non-obvious logic (e.g., legacy env var mapping, periodic cleanup reasons)
-- Avoid obvious comments that repeat what the code says
-- No JSDoc/TSDoc equivalent beyond standard Go doc comments
+```go
+logger.Info("http server starting", "addr", cfg.HTTPAddr)
+logger.Error("failed to connect to postgres", "error", err)
+logger.Warn("running without TLS with insecure auth allowed", "imap", imapAddr, "smtp", smtpAddr)
+```
 
-**TODO Comments:**
-- Rare; use standard `// TODO: description` if needed
+### Request Logging
+`internal/api/middleware.go` provides a `StructuredLogger` middleware that logs method, path, duration, and request ID for every HTTP request.
 
-## Function Design
+## Configuration
 
-**Size:**
-- Prefer functions under ~50 lines; extract helpers for complex logic
-- Some accepted exceptions for HTTP setup and protocol parsers (SMTP Data, server main)
+### Dual-Source Config
+Configuration is loaded from **TOML files** and overridden by **environment variables**.
 
-**Parameters:**
-- `context.Context` as first parameter for any I/O or long-running function
-- Options objects for complex updates (MessagePatch with pointer fields for optional updates)
-- Max ~4-5 positional parameters; use structs for more
+- Default config path: `/etc/postnest/postnest.conf`
+- Override via `POSTNEST_CONFIG_PATH`
+- Environment variable format: `POSTNEST_<SECTION>_<KEY>` (e.g., `POSTNEST_DATABASE_DSN`)
 
-**Return Values:**
-- Return `(value, error)` pairs
-- Guard clauses with early returns for error cases
-- Use `coalesce` in SQL for optional field updates instead of multiple query variants
+### Legacy Compatibility
+A legacy environment map (`internal/config/loader.go`) preserves backward compatibility for older variable names (e.g., `POSTGRES_DSN` maps to `POSTNEST_DATABASE_DSN`).
 
-## Module Design
+### Validation
+The loader validates required fields after merging sources and returns an explicit error listing missing values:
 
-**Package Structure:**
-- One package per domain concern under `internal/` (auth, api, mailstore, workers, etc.)
-- `cmd/` contains `main` packages (server, worker, migrate)
-- `internal/models/` holds shared domain structs (User, Message, Domain, etc.)
+```go
+var missing []string
+if cfg.PostgresDSN == "" {
+    missing = append(missing, "database.dsn (...)")
+}
+return nil, fmt.Errorf("config validation failed:\n  - %s", strings.Join(missing, "\n  - "))
+```
 
-**Constructor Pattern:**
-- Export constructor functions that return concrete types
-- Types implement interfaces implicitly (no `implements` keyword)
+## Database & Transactions
 
-**Interfaces:**
-- Define interfaces in consumer packages (mailstore.Store defined in mailstore, consumed by webmail)
-- This enables easy manual mocking in tests
+### Raw SQL with pgx
+No ORM is used. The project uses `pgx/v5` with raw SQL and explicit `Scan` calls:
 
-**State Management:**
-- Services hold dependencies as struct fields (pool, logger, config values)
-- Prefer dependency injection via constructors over package-level globals
-- Context values used for request-scoped data (user, domain_id, request_id)
+```go
+row := s.pool.QueryRow(ctx, `SELECT id, email FROM users WHERE email=$1`, email)
+var u models.User
+if err := row.Scan(&u.ID, &u.Email); err != nil {
+    ...
+}
+```
 
----
+### Transaction Pattern
+Begin, defer rollback, commit on success:
 
-*Convention analysis: 2026-05-17*
-*Update when patterns change*
+```go
+tx, err := s.pool.Begin(ctx)
+if err != nil {
+    return err
+}
+defer tx.Rollback(ctx)
+
+// ... insert operations ...
+
+return tx.Commit(ctx)
+```
+
+## Authentication & Security
+
+### Password Hashing
+Argon2id with a custom `$`-delimited base64 encoding:
+
+```go
+hash := argon2.IDKey([]byte(password), salt, s.argonTime, s.argonMemory, s.argonThreads, 32)
+encoded := base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash)
+```
+
+### Session Tokens
+Tokens are generated from 32 random bytes, base64-URL-encoded for the client, and SHA-256 hashed for storage:
+
+```go
+tokenBytes := make([]byte, 32)
+_, _ = rand.Read(tokenBytes)
+token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+hash := sha256.Sum256(tokenBytes)
+hashStr := base64.RawStdEncoding.EncodeToString(hash[:])
+```
+
+### Secure Cookies
+Session cookies are HttpOnly, Secure (when TLS is enabled), SameSite=Lax, and 7-day expiry:
+
+```go
+http.SetCookie(w, &http.Cookie{
+    Name:     "session",
+    Value:    token,
+    Path:     "/",
+    HttpOnly: true,
+    Secure:   secure,
+    SameSite: http.SameSiteLaxMode,
+    MaxAge:   86400 * 7,
+})
+```
+
+## HTTP API Patterns
+
+### Router
+Chi (`github.com/go-chi/chi/v5`) is used for HTTP routing.
+
+### Middleware Stack (order matters)
+1. `api.RequestID` — injects or propagates `X-Request-ID`
+2. `api.StructuredLogger` — structured request logging
+3. `api.Recovery` — recovers panics, returns 500, logs stack trace
+4. `api.CORS` — origin-restricted CORS headers
+5. `api.NewRateLimiter(...).Handler` — per-IP token-bucket rate limiting
+
+### Handler Registration Pattern
+Packages expose a `RegisterRoutes(r chi.Router)` method on their handler struct. The main server wires them together in `cmd/server/main.go`.
+
+### Response Helpers
+A local `writeJSON` helper in `cmd/server/main.go` sets `Content-Type` and encodes the body:
+
+```go
+func writeJSON(w http.ResponseWriter, status int, body any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
+}
+```
+
+`internal/webmail/webmail.go` defines its own identical local helper rather than importing a shared one.
+
+### Domain Context
+Multi-tenant domain IDs are extracted from query params (`domain_id`), headers (`X-Domain-ID`), or URL params, then validated via `RequireDomainAdmin` middleware and stored in context.
+
+## Worker & Background Job Patterns
+
+### Job Structure
+Jobs are JSON-serialized structs enqueued in Redis lists:
+
+```go
+// `internal/workers/workers.go`
+type Job struct {
+    ID          string          `json:"id"`
+    Type        string          `json:"type"`
+    Payload     json.RawMessage `json:"payload"`
+    MaxAttempts int             `json:"max_attempts"`
+    CreatedAt   int64           `json:"created_at"`
+    ScheduledAt int64           `json:"scheduled_at"`
+}
+```
+
+### Processor Interface
+Each background job type implements the `Processor` interface:
+
+```go
+type Processor interface {
+    Process(ctx context.Context, job *Job) error
+}
+```
+
+### Retry & Dead Letter
+Failed jobs are retried with exponential backoff via a Redis sorted set (`postnest:delayed`). After `MaxAttempts`, they move to a dead-letter queue (`postnest:dead`).
+
+## Frontend Conventions
+
+### File Structure
+- Components live in `web/src/components/*.jsx`
+- API calls are centralized in `web/src/api.js`
+- Styling uses Tailwind CSS; custom base styles in `web/src/styles/index.css`
+
+### Component Style
+Functional components with hooks, default exports, and destructured props:
+
+```jsx
+// `web/src/components/Login.jsx`
+export default function Login({ onLogin }) {
+  const [email, setEmail] = useState('')
+  ...
+}
+```
+
+### HTTP Client
+Axios is configured with a base URL and a response interceptor for global error handling:
+
+```js
+// `web/src/api.js`
+const api = axios.create({
+  baseURL: '/api/v1',
+  withCredentials: true,
+})
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      window.location.href = '/login'
+    }
+    return Promise.reject(error)
+  }
+)
+```
+
+### Icons
+All icons come from `lucide-react`:
+
+```jsx
+import { Mail, Lock, AlertCircle } from 'lucide-react'
+```
+
+### Routing
+React Router DOM v7 is used in `web/src/App.jsx` with route definitions and a layout wrapper.
+
+### SSE
+A custom `SSEClient` class wraps `EventSource` with reconnect logic and emits to registered listeners.
+
+## Build & Deployment
+
+### Makefile Targets
+```
+make build          # builds all binaries and the webui
+make build-server   # go build ./cmd/server
+make build-webui    # cd web && npm run build
+make test           # go test ./...
+make migrate        # golang-migrate up
+make admin-setup    # creates initial admin user + domain
+```
+
+### Docker
+- `Dockerfile.server` — Go binary build
+- `Dockerfile.webui` — Vite build + static serve
+- `Dockerfile.migrate` — migration runner
+- `Dockerfile.worker` — worker binary
+- `docker-compose.yml` brings up Postgres, Redis, server, worker, and webui.
+
+### TLS Strategy
+Three mutually exclusive TLS modes chosen via config:
+1. **ACME/Let's Encrypt** — `certmanager` package handles DNS-01 issuance and renewal
+2. **Static certificates** — `tls.LoadX509KeyPair`
+3. **No TLS** — optionally allows insecure plaintext auth for local development

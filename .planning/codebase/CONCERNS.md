@@ -1,244 +1,593 @@
-# Codebase Concerns
+# PostNest Codebase Concerns
 
-**Analysis Date:** 2026-05-17
-
-## Tech Debt
-
-**Webmail domain scoping uses user.ID as fallback:**
-- Issue: `internal/webmail/webmail.go:domainID()` falls back to `u.ID` when a user has no domain memberships, treating the user's UUID as a domain ID. Multiple handlers call this without validating the result.
-- Files: `internal/webmail/webmail.go` (lines 66-79)
-- Why: Placeholder during MVP multi-tenant implementation; actual domain context from `X-Domain-ID` header or `domain_members` lookup not yet wired.
-- Impact: Cross-domain data leakage risk; queries may match nothing or the wrong rows silently.
-- Fix approach: Enforce `X-Domain-ID` header on every request, validate membership in `RequireSession` or a new middleware, and return 400 when domain is missing.
-
-**IMAP UIDs derived from message UUIDs instead of dedicated table:**
-- Issue: The `imap_uids` table exists in schema but UIDs are computed deterministically from message UUIDs (`internal/imap/backend.go:messageUID`).
-- Files: `internal/imap/backend.go`
-- Why: Convenience during initial IMAP implementation.
-- Impact: UID validity violations on message deletion/recreation; IMAP clients may see inconsistent UIDs across sessions.
-- Fix approach: Populate `imap_uids` in `mailstore` on message creation and read from it in the IMAP backend.
-
-**Search indexer bypasses database trigger:**
-- Issue: `messages_update_search_vector()` trigger is defined in migrations, but `internal/search/search.go` and `internal/mailstore/pgstore.go` update `search_vector` via direct SQL.
-- Files: `internal/search/search.go`, `internal/mailstore/pgstore.go`
-- Why: Trigger was added after initial store implementation; not retrofitted.
-- Impact: Dual maintenance path; risk of divergent indexing logic between trigger and application code.
-- Fix approach: Remove application-side `UpdateSearchVector` and rely on the trigger; verify with tests.
-
-**Auth package reimplements standard library functions:**
-- Issue: `splitN` reimplements `strings.SplitN` and `constantTimeCompare` reimplements `crypto/subtle.ConstantTimeCompare`.
-- Files: `internal/auth/auth.go`
-- Why: Likely added before discovering stdlib equivalents.
-- Impact: Maintenance burden and risk of subtle timing bugs in hand-rolled constant-time comparison.
-- Fix approach: Delete `splitN` and `constantTimeCompare`; use `strings.SplitN` and `subtle.ConstantTimeCompare`.
-
-**Config loader uses heavy reflection for env overrides:**
-- Issue: `applyEnvOverrides` and `applySectionOverrides` walk structs reflectively at runtime to map env vars to fields.
-- Files: `internal/config/loader.go` (lines 163-223)
-- Why: Generic env override system without code generation.
-- Impact: Fragile to struct changes; panics on unexpected types; hard to debug env override failures.
-- Fix approach: Replace with explicit mapping or use a struct tag-based library like `envconfig`/`caarlos0/env`.
-
-## Known Bugs
-
-**GetThread ignores thread membership and returns all user messages:**
-- Symptoms: Thread view shows every message in the mailbox, not just messages belonging to the requested thread.
-- Trigger: Open any thread in the webmail API.
-- Files: `internal/mailstore/pgstore.go:GetThread` (lines 310-316)
-- Root cause: Implementation calls `ListMessages(ctx, domainID, userID, nil, ListOptions{Limit: 1000, ...})` with no thread filter, completely ignoring the thread's `message_ids` array.
-- Fix: Filter `ListMessages` by the thread's `message_ids` or query messages directly with `id = ANY(thread.message_ids)`.
-
-**FindOrCreateThread passes raw subject as subject_hash:**
-- Symptoms: Thread matching fails or creates duplicate threads when subjects differ only in whitespace/case.
-- Trigger: Receive two inbound messages with similar subjects.
-- Files: `internal/mailstore/pgstore.go:FindOrCreateThread` (lines 337-358)
-- Root cause: The function passes the raw `subject` string as `$4` to match against the `subject_hash` column, but the column expects a hashed value. The `ON CONFLICT (domain_id, user_id, subject_hash)` may never fire.
-- Fix: Compute a stable hash (e.g., lowercase + normalized whitespace) and use it consistently for both insert and conflict detection.
-
-**Greylist deferral has no retry logic:**
-- Symptoms: Greylisted messages are silently accepted on first arrival instead of being deferred.
-- Trigger: Inbound mail from an unknown sender triggers greylist evaluation.
-- Files: `internal/reputation/reputation.go:EvaluateInbound`
-- Root cause: The reputation engine returns `DecisionDefer` but the inbound worker does not act on it — there is no delayed retry queue for deferred messages.
-- Fix: Implement a `delayed_defer` job type or add greylist-aware retry in the inbound worker.
-
-## Security Considerations
-
-**Webhook signature verification has insecure fallback:**
-- Risk: If `X-Postmark-Signature` header is absent, the webhook handler falls back to comparing `X-Postmark-Server-Token` against the configured secret.
-- Files: `internal/webhook/webhook.go:verifySignature` (lines 65-85)
-- Current mitigation: Token comparison still requires knowledge of the secret.
-- Recommendations: Remove the fallback entirely; reject webhooks with missing signatures. Document that the secret must be configured.
-
-**No CSRF protection on REST API:**
-- Risk: Authenticated POST/PATCH/DELETE endpoints rely solely on the session cookie; no CSRF token or double-submit cookie pattern.
-- Files: `internal/webmail/webmail.go` (all mutating handlers), `internal/api/middleware.go`
-- Current mitigation: `SameSite=Lax` on session cookie provides partial protection.
-- Recommendations: Add `X-CSRF-Token` validation or implement double-submit cookie pattern for state-changing requests.
-
-**SMTP and IMAP have no brute-force protection:**
-- Risk: Unlimited authentication attempts against SMTP/IMAP without rate limiting.
-- Files: `internal/smtp/smtp.go`, `internal/imap/backend.go`
-- Current mitigation: None (HTTP has `RateLimiter` middleware, but it does not cover SMTP/IMAP).
-- Recommendations: Add per-source IP rate limiting or account lockout for failed SMTP/IMAP login attempts.
-
-**HTML sanitization may over-strip legitimate content:**
-- Risk: `bluemonday.UGCPolicy()` is applied to draft HTML bodies; some email formatting (styles, inline images) may be stripped.
-- Files: `internal/webmail/webmail.go:createDraft`, `internal/webmail/webmail.go:updateDraft`
-- Current mitigation: Policy prevents XSS.
-- Recommendations: Define an email-specific HTML policy that allows safe inline styles and cid: references for embedded images.
-
-**AllowInsecureAuth flag permits cleartext credentials:**
-- Risk: When no TLS is configured, `allowInsecureAuth=true` enables AUTH PLAIN over unencrypted SMTP/IMAP.
-- Files: `cmd/server/main.go` (default branch), `internal/smtp/smtp.go`
-- Current mitigation: Disabled by default; requires explicit env override.
-- Recommendations: Remove the flag entirely and mandate TLS for authentication. If truly needed for local dev, gate it behind build tags.
-
-## Performance Bottlenecks
-
-**IMAP loads entire mailbox into memory:**
-- Problem: `ListMessages` in IMAP fetches up to `maxIMAPBatchSize = 5000` messages with all columns into a slice.
-- Files: `internal/imap/backend.go:ListMessages` (line 148)
-- Measurement: 5000 messages × ~2KB each = ~10MB per IMAP LIST/FETCH; grows linearly.
-- Cause: No cursor-based pagination; all messages matching the sequence set are materialized.
-- Improvement path: Implement server-side cursor pagination for large mailboxes or fetch message metadata only, loading bodies on demand.
-
-**Search query lacks prepared statement caching:**
-- Problem: Full-text search queries use `plainto_tsquery('english', $3)` inline, which cannot be prepared by pgx because the tsquery function is in the query text.
-- Files: `internal/mailstore/pgstore.go:Search` (lines 454-490)
-- Cause: Dynamic `ORDER BY` clause also prevents prepared statement reuse.
-- Improvement path: Use a stored procedure or accept the plan cache miss; add `tsquery` parameterization via `to_tsquery` with pre-parsed input.
-
-**ListMessages counts total before paginating:**
-- Problem: Every label/message list performs a `COUNT(*)` followed by the data query.
-- Files: `internal/mailstore/pgstore.go:ListMessages` (lines 113-127)
-- Cause: Standard pagination pattern.
-- Improvement path: Use keyset pagination (`cursor` + `LIMIT`) to eliminate the expensive count on large mailboxes.
-
-## Fragile Areas
-
-**Worker pool retry logic:**
-- Files: `internal/workers/workers.go:worker` (lines 102-144)
-- Why fragile: Retry count and dead-letter logic rely on Redis list ops that are not atomic with job state transitions. A crash between `RPush` (retry) and `LRem` (remove from processing) can duplicate jobs.
-- Common failures: Duplicate processing of the same job under Redis connection blips.
-- Safe modification: Wrap retry/dead-letter moves in a Lua script or Redis transaction.
-- Test coverage: Workers have unit tests with miniredis, but no integration tests against real Redis failure modes.
-
-**Certificate manager renewal loop:**
-- Files: `internal/certmanager/manager.go`
-- Why fragile: ACME renewal runs in a background goroutine with no external health exposure. Certificate expiry is only checked at startup and in the renewal loop; if the loop panics, the server continues with a stale cert.
-- Common failures: DNS provider token expiry causes silent renewal failures; certificate expires without alerting.
-- Safe modification: Add a `/healthz` check for certificate expiry window, and recover panics in `renewalLoop`.
-- Test coverage: None.
-
-**Webhook deduplication relies on Redis TTL only:**
-- Files: `internal/webhook/webhook.go:dedup` (lines 120-140)
-- Why fragile: Duplicate detection uses a 24-hour Redis TTL. If Redis is flushed or the TTL expires, duplicate webhooks re-process. No persistent dedup table.
-- Common failures: Redis eviction under memory pressure causes duplicate inbound messages.
-- Safe modification: Add a `processed_webhooks` table with a unique constraint on `(webhook_type, message_id)`.
-- Test coverage: Only unit tests with miniredis; no persistence test.
-
-**SMTP DATA handler parses entire message into memory:**
-- Files: `internal/smtp/smtp.go:Data` (lines 149-250)
-- Why fragile: The full message body is read into memory and parsed by `go-message/mail`, then relayed to Postmark. Large attachments can exhaust memory.
-- Common failures: OOM on messages near `maxMessageSize`.
-- Safe modification: Stream large bodies to temporary files and parse incrementally; enforce per-attachment size limits before buffering.
-- Test coverage: SMTP tests only cover AUTH, not DATA relay or body parsing.
-
-## Scaling Limits
-
-**IMAP max batch size:**
-- Current capacity: 5000 messages per mailbox query.
-- Limit: Mailboxes with >5000 messages return truncated results, violating IMAP sequence numbering correctness.
-- Symptoms at limit: IMAP clients show incomplete folders or corrupted message lists.
-- Scaling path: Implement cursor-based message streaming for IMAP FETCH/LIST.
-
-**Single Redis connection for queues and pub/sub:**
-- Current capacity: One `go-redis` UniversalClient shared across job queues, webhook dedup, and IMAP IDLE pub/sub.
-- Limit: Redis `BLPOP` blocking calls can delay pub/sub message delivery; contention under high load.
-- Symptoms at limit: IMAP IDLE latency spikes; webhook processing delays.
-- Scaling path: Separate Redis clients for pub/sub and queue operations, or shard queues by processor type.
-
-## Dependencies at Risk
-
-**emersion/go-ical, go-sasl, go-vcard at pseudo-versions:**
-- Risk: All three emersion libraries track unstable pseudo-versions (`v0.0.0-...`). API changes in future commits could break CalDAV/CardDAV/IMAP/SMTP integration.
-- Impact: Build breakage on `go get -u`; no semantic versioning guarantees.
-- Migration plan: Pin to specific commit hashes in `go.mod` or vendor the libraries. Monitor for tagged releases.
-
-**github.com/yuin/gopher-lua (indirect):**
-- Risk: Pulled in via `go-acme/lego/v4` → `microcosm-cc/bluemonday` dependency chain. Used for Lua scripting in lego DNS provider.
-- Impact: Unnecessary dependency surface for a mail server; CVE exposure.
-- Migration plan: Evaluate whether `bluemonday` can be replaced with a lighter HTML sanitizer, or switch to `microcosm-cc/bluemonday/v2` if it reduces indirect deps.
-
-## Missing Critical Features
-
-**Admin REST handlers:**
-- Problem: Only `/admin/api/v1/domains` exists as an inline handler in `cmd/server/main.go`. No user provisioning, domain management, delivery logs, or reputation dashboards.
-- Current workaround: Direct database access or ad-hoc scripts.
-- Blocks: Multi-tenant self-service onboarding.
-- Implementation complexity: Medium (requires additional middleware, handlers, and store methods).
-
-**STARTTLS for IMAP/SMTP:**
-- Problem: TLS is all-or-nothing (either ACME/static certs at startup or plaintext). No STARTTLS upgrade on existing listeners.
-- Current workaround: Run on separate TLS ports (993/465) or without encryption.
-- Blocks: Standard email client configurations that expect STARTTLS on 143/587.
-- Implementation complexity: Low-Medium (go-imap and go-smtp both support STARTTLS).
-
-**CalDAV implementation:**
-- Problem: All CalDAV methods return `fmt.Errorf("not implemented")`.
-- Files: `internal/dav/dav.go` (caldavBackend stubs)
-- Current workaround: None.
-- Blocks: Calendar sync with Apple/Google clients.
-- Implementation complexity: High (requires `calendar_events` table, recurrence handling, iCalendar parsing).
-
-**Asynchronous search indexing:**
-- Problem: `Indexer.Queue` updates `search_vector` synchronously via direct SQL. No background queue for index updates.
-- Files: `internal/search/search.go`
-- Current workaround: Synchronous updates on message creation.
-- Blocks: High-volume inbound processing throughput.
-- Implementation complexity: Low (add `search_index` job type to worker pool).
-
-## Test Coverage Gaps
-
-**Mailstore package (zero tests):**
-- What's not tested: All 25+ methods of `PGStore` — CreateMessage, UpdateMessage, ListMessages, Search, thread management, label CRUD, attachment handling.
-- Risk: SQL errors, transaction bugs, and schema mismatch regressions go undetected.
-- Priority: High
-- Difficulty to test: Medium; requires PostgreSQL testcontainer or `pgxmock`.
-
-**Auth package (zero tests):**
-- What's not tested: Argon2id hashing, session lifecycle, API key validation, password updates, domain membership checks.
-- Risk: Authentication bypass, session fixation, or hash parameter changes breaking logins.
-- Priority: High
-- Difficulty to test: Low-Medium; requires `pgxmock` or test database.
-
-**IMAP backend (zero tests):**
-- What's not tested: Mailbox listing, FETCH, SEARCH, APPEND, EXPUNGE, COPY, flag updates, UID mapping.
-- Risk: Protocol compliance regressions, data corruption under concurrent access.
-- Priority: High
-- Difficulty to test: High; requires an IMAP client library in tests or the go-imap test helpers.
-
-**Certmanager (zero tests):**
-- What's not tested: ACME registration, certificate loading, renewal logic, DNS provider setup.
-- Risk: Certificate expiry in production due to untested renewal paths.
-- Priority: Medium
-- Difficulty to test: High; requires ACME staging server mocking.
-
-**Postmark client (zero tests):**
-- What's not tested: SendEmail, ParseInbound, error handling for Postmark API responses.
-- Risk: Payload serialization bugs or response parsing failures on live API changes.
-- Priority: Medium
-- Difficulty to test: Low; mock HTTP server sufficient.
-
-**SMTP DATA relay (zero tests):**
-- What's not tested: End-to-end message parsing, Postmark relay, Sent copy persistence.
-- Files: `internal/smtp/smtp.go:Data`
-- Risk: Message corruption or relay failure in production.
-- Priority: High
-- Difficulty to test: Medium; requires mock Postmark server and MIME fixture data.
+> Generated by codebase mapper agent for `github.com/go-postnest/postnest`  
+> Scope: Go 1.25.0 backend + React 19 Vite frontend
 
 ---
 
-*Concerns audit: 2026-05-17*
-*Update as issues are fixed or new ones discovered*
+## Table of Contents
+
+1. [Security](#security)
+2. [Tech Debt & Architectural Fragility](#tech-debt--architectural-fragility)
+3. [Bugs & Behavioral Risks](#bugs--behavioral-risks)
+4. [Performance](#performance)
+5. [Error Handling & Observability](#error-handling--observability)
+6. [Missing Tests & Testability](#missing-tests--testability)
+7. [Hardcoded Values & Configuration](#hardcoded-values--configuration)
+8. [Frontend Concerns](#frontend-concerns)
+9. [Schema & Data Layer](#schema--data-layer)
+
+---
+
+## Security
+
+### 1. Webhook signature fallback uses non-constant-time comparison
+**File:** `internal/webhook/webhook.go`  
+The HMAC verification path is correct (`hmac.Equal`), but the legacy token fallback does a simple string comparison:
+
+```go
+// Fallback to legacy token check.
+token := r.Header.Get("X-Postmark-Server-Token")
+return token != "" && token == h.secret
+```
+
+This leaks timing information about the secret. The fallback should also use `hmac.Equal` or be removed entirely if HMAC is now mandatory.
+
+### 2. Webhook deduplication fails open
+**File:** `internal/webhook/webhook.go`
+
+```go
+ok, err := h.redis.SetNX(ctx, key, "1", 5*time.Minute).Result()
+if err != nil {
+    return true // fail open: process on Redis error
+}
+```
+
+If Redis is unavailable or slow, the same webhook will be processed repeatedly. For an email platform, this means duplicate inbound messages, duplicate bounces, and duplicate delivery confirmations.
+
+### 3. SQL injection via `fmt.Sprintf` in reputation engine
+**File:** `internal/reputation/reputation.go`
+
+```go
+_, err = e.pool.Exec(ctx, fmt.Sprintf(`
+    INSERT INTO contact_reputation (contact_id, domain_id, %s, last_interaction_at, updated_at)
+    VALUES ($1, $2, 1, now(), now())
+    ON CONFLICT (contact_id) DO UPDATE SET
+        %s = contact_reputation.%s + 1,
+        last_interaction_at = now(),
+        updated_at = now()
+`, col, col, col), contactID, domainID)
+```
+
+`col` is derived from a hardcoded switch on `eventType`, so the injection surface is currently narrow, but the pattern is dangerous. Any future change that makes `eventType` externally influenced (e.g., from a webhook payload) turns this into a direct SQL injection vector.
+
+### 4. Session cookie lacks `SameSite=Strict`
+**File:** `internal/api/middleware.go`
+
+```go
+http.SetCookie(w, &http.Cookie{
+    Name:     "session",
+    Value:    token,
+    Path:     "/",
+    HttpOnly: true,
+    Secure:   secure,
+    SameSite: http.SameSiteLaxMode,
+    MaxAge:   86400 * 7,
+})
+```
+
+`SameSiteLaxMode` is acceptable for many apps, but an email platform handling sensitive data should strongly consider `SameSiteStrict` for admin routes, or at least make this configurable.
+
+### 5. No CSRF protection on state-changing API endpoints
+**File:** `web/src/api.js`, `internal/api/middleware.go`  
+The frontend `api.js` uses `withCredentials: true` but there is no CSRF token mechanism. The backend does not validate any CSRF token on `POST/PUT/PATCH/DELETE`. Cross-site POSTs to `/api/v1/messages/batch` or `/api/v1/drafts` would succeed if the victim is authenticated via cookie.
+
+### 6. Plaintext auth allowed in production configuration
+**File:** `cmd/server/main.go`, `internal/config/config.go`
+
+```go
+AllowInsecureAuth bool `env:"ALLOW_INSECURE_AUTH" envDefault:"false"`
+```
+
+When `AllowInsecureAuth` is true (or when no TLS is configured), the IMAP and SMTP servers accept plaintext passwords. The server logs a warning, but there is no hard stop. In a defense/finance/healthcare context, plaintext auth should be impossible to enable accidentally.
+
+### 7. `X-Forwarded-For` used without validation
+**File:** `internal/api/middleware.go`
+
+```go
+ip := r.RemoteAddr
+if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+    ip = strings.Split(xf, ",")[0]
+}
+```
+
+The rate limiter and any future IP-based logic trust `X-Forwarded-For` without verifying the request came from a known reverse proxy. A direct client can spoof any IP and evade rate limits.
+
+### 8. DAV basic auth sent over potentially unencrypted HTTP
+**File:** `internal/dav/dav.go`  
+The CardDAV/CalDAV handler uses HTTP Basic Auth. There is no enforcement that the connection is TLS-encrypted. If the DAV endpoint is served without TLS (e.g., in development or misconfigured production), passwords are sent Base64-encoded in plaintext.
+
+### 9. `panic` in production initialization path
+**File:** `internal/webui/proxy.go`
+
+```go
+func NewAPIProxy(apiBaseURL string, log *slog.Logger) *APIProxy {
+    target, err := url.Parse(apiBaseURL)
+    if err != nil {
+        log.Error("invalid api base url", ...)
+        panic(err)
+    }
+    ...
+}
+```
+
+A misconfigured `WEBUI_API_BASE_URL` causes the entire webui binary to crash at startup rather than return an error.
+
+### 10. Postmark API token stored in plaintext in database
+**File:** `internal/models/models.go`, schema `domains.postmark_token`  
+The `PostmarkToken` column holds the raw API token. There is no encryption-at-rest for third-party credentials.
+
+---
+
+## Tech Debt & Architectural Fragility
+
+### 11. CalDAV is completely unimplemented
+**File:** `internal/dav/dav.go`  
+Every CalDAV method returns `fmt.Errorf("not implemented")`. The `Admin` dashboard advertises calendar support (`web/src/components/Admin.jsx` shows "Calendar: Running"), but the backend cannot handle any calendar operations. This is a product/marketing risk.
+
+### 12. Search indexer is a no-op queue
+**File:** `internal/search/search.go`
+
+```go
+// ProcessQueue processes queued messages.
+func (i *Indexer) ProcessQueue(ctx context.Context, batchSize int) (int, error) {
+    // Simplified: no-op because Queue updates directly.
+    return 0, nil
+}
+```
+
+The indexer interface claims to support an async queue but `ProcessQueue` does nothing. The `Queue` method updates the search vector synchronously inside the inbound mail transaction. For large messages or high volume, this blocks the inbound pipeline.
+
+### 13. Worker pool busy-loops when queue is empty
+**File:** `internal/workers/workers.go`
+
+```go
+func (p *Pool) worker(ctx context.Context) {
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        default:
+        }
+        // Promote any delayed jobs whose time has come.
+        if err := p.redis.PromoteReadyDelayed(...); err != nil {
+            p.logger.Error("promote delayed jobs failed", "error", err)
+        }
+        payload, err := p.redis.Dequeue(ctx, queueJobs, p.pollInterval)
+        ...
+    }
+}
+```
+
+When the queue is empty, `BRPop` blocks for `pollInterval` (default 5s), which is fine. However, if `Dequeue` returns an error (e.g., Redis transient failure), the loop immediately retries with no backoff, creating a hot CPU spin. The `continue` after logging the error skips to the next iteration immediately.
+
+### 14. IMAP UID stability is broken
+**File:** `internal/imap/backend.go`
+
+```go
+func messageUID(msg *models.Message) uint32 {
+    if len(msg.ID) < 4 {
+        return 1
+    }
+    return uint32(msg.ID[0])<<24 | uint32(msg.ID[1])<<16 | uint32(msg.ID[2])<<8 | uint32(msg.ID[3])
+}
+```
+
+UUIDv7 bytes are time-ordered but not guaranteed to be unique in the first 4 bytes. Collisions are unlikely but possible, and more importantly the UID is not stable across mailbox renames or server restarts. A proper IMAP UID table exists in the schema (`imap_uids`) but is never used by the backend.
+
+### 15. IMAP `SearchMessages` ignores criteria entirely
+**File:** `internal/imap/backend.go`
+
+```go
+func (m *imapMailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([]uint32, error) {
+    ctx := context.Background()
+    msgs, _, err := m.backend.store.ListMessages(ctx, m.domainID, m.user.ID, &m.label.ID, mailstore.ListOptions{Limit: maxIMAPBatchSize})
+    if err != nil {
+        return nil, err
+    }
+    var out []uint32
+    for _, msg := range msgs {
+        out = append(out, messageUID(msg))
+    }
+    return out, nil
+}
+```
+
+The `criteria` parameter is completely ignored. Any IMAP client search returns all messages, which breaks client expectations and can cause massive data transfer.
+
+### 16. `FindOrCreateThread` has a fragile race-condition fix
+**File:** `internal/mailstore/pgstore.go`  
+The code uses `SELECT ... FOR UPDATE` followed by `ON CONFLICT ... DO NOTHING`, but if the conflict branch is taken, it does a second `SELECT` without `FOR UPDATE`, meaning two concurrent inbounds with the same subject can still race and one may fail to append its `message_id` to the thread's `message_ids` array.
+
+### 17. Redis delayed-job promotion is non-atomic
+**File:** `internal/redis/redis.go`
+
+```go
+for _, item := range ready {
+    if err := c.UniversalClient.LPush(ctx, targetQueue, item).Err(); err != nil {
+        return err
+    }
+    if err := c.UniversalClient.ZRem(ctx, delayedQueue, item).Err(); err != nil {
+        return err
+    }
+}
+```
+
+If the process crashes between `LPush` and `ZRem`, the job exists in both queues and will be processed twice.
+
+### 18. `GetThread` returns all user messages, not thread messages
+**File:** `internal/mailstore/pgstore.go`
+
+```go
+func (s *PGStore) GetThread(ctx context.Context, domainID, userID, threadID uuid.UUID) (*models.Thread, []*models.Message, error) {
+    ...
+    msgs, _, err := s.ListMessages(ctx, domainID, userID, nil, ListOptions{Limit: 1000, SortField: "date", SortDesc: true})
+    return &t, msgs, err
+}
+```
+
+It ignores the `threadID` entirely and loads the last 1000 messages for the user. For a user with many messages, this is wildly inefficient and returns the wrong data.
+
+---
+
+## Bugs & Behavioral Risks
+
+### 19. Batch operations silently ignore failures
+**File:** `internal/webmail/webmail.go`
+
+```go
+for _, id := range req.MessageIDs {
+    switch req.Action {
+    case "mark_read":
+        tr := true
+        _ = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &tr})
+    case "mark_unread":
+        _ = h.store.UpdateMessage(...)
+    case "trash":
+        _ = h.store.MoveToMailbox(...)
+    case "delete":
+        _ = h.store.DeleteMessage(...)
+    }
+}
+```
+
+Every error in batch processing is discarded. A partial failure (e.g., one message locked by another transaction) returns `204 No Content` with no indication of what succeeded or failed.
+
+### 20. `sendDraft` ignores JSON marshal errors
+**File:** `internal/webmail/webmail.go`
+
+```go
+payload, _ := json.Marshal(map[string]any{...})
+...
+jb, _ := json.Marshal(job)
+if err := h.redis.Enqueue(r.Context(), "queue:jobs", jb); err != nil {
+```
+
+If `json.Marshal` fails (unlikely but possible with malformed data), a zero-length or nil payload is enqueued, causing the worker to fail repeatedly until dead-lettered.
+
+### 21. Inbound processor parses `net.ParseIP` on an email address
+**File:** `internal/workers/inbound.go`
+
+```go
+decision, err := p.rep.EvaluateInbound(ctx, domain.ID, in.From, recipient, net.ParseIP(in.From))
+```
+
+`in.From` is an email address (e.g., `alice@example.com`). `net.ParseIP("alice@example.com")` returns `nil`, so the IP-based reputation check is always a no-op.
+
+### 22. Spam processor cannot update reputation
+**File:** `internal/workers/spam.go`  
+The processor lacks the domain ID needed to call `UpdateReputation`. The code contains an explicit comment admitting this, and the TODO has no tracking issue:
+
+```go
+// Note: updating reputation requires domainID which we don't have here without auth lookup.
+// The webhook handler should enrich the payload with domain_id before enqueueing.
+```
+
+### 23. `AuthSession` last-used update is fire-and-forget
+**File:** `internal/auth/auth.go`
+
+```go
+_, _ = s.pool.Exec(ctx, `UPDATE auth_sessions SET last_used_at=now() WHERE id=$1`, session.ID)
+```
+
+Errors from updating `last_used_at` are ignored. If the database is read-only or the connection is broken, sessions will still appear valid but their `last_used_at` will be stale, complicating debugging and session auditing.
+
+### 24. `writeJSON` ignores encoding errors across the codebase
+**Files:** `cmd/server/main.go`, `internal/webmail/webmail.go`, `internal/api/errors.go`
+
+```go
+func writeJSON(w http.ResponseWriter, status int, body any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
+}
+```
+
+If JSON encoding fails (e.g., channel in struct, NaN float), the client receives a truncated or empty body with the HTTP status already sent. This makes client-side error handling impossible.
+
+### 25. Bounce and delivery workers build JSON with `fmt.Sprintf`
+**File:** `internal/workers/bounce.go`, `internal/workers/delivery.go`
+
+```go
+fmt.Sprintf(`{"bounce_type":"%s","description":"%s","diagnostic":"%s"}`, bounceType, bounceDescription, diagnosticCode)
+```
+
+If any of these strings contain quotes or backslashes, invalid JSON is produced. The database `::jsonb` cast will then throw an error at runtime.
+
+### 26. CORS in webui router allows wildcard `*`
+**File:** `internal/webui/router.go`
+
+```go
+if o == origin || o == "*" {
+    allowed = true
+    break
+}
+```
+
+The webui CORS middleware explicitly supports `"*"` with credentials (`Access-Control-Allow-Credentials: true`). Per the Fetch spec, `*` with credentials is invalid and browsers will reject it, but the configuration path is confusing and dangerous.
+
+---
+
+## Performance
+
+### 27. Label listing triggers N+1 count queries
+**File:** `internal/webmail/webmail.go`
+
+```go
+for _, l := range labels {
+    lo := labelOut{Label: l}
+    lo.Total, _ = h.store.CountTotalByLabel(r.Context(), did, u.ID, l.ID)
+    lo.Unread, _ = h.store.CountUnreadByLabel(r.Context(), did, u.ID, l.ID)
+    out = append(out, lo)
+}
+```
+
+For a user with 20 labels, this makes 40 count queries. A single query with `GROUP BY` would be far more efficient.
+
+### 28. Full-text search re-computes `to_tsvector` on every query
+**File:** `internal/mailstore/pgstore.go`
+
+```go
+SELECT ... FROM messages
+WHERE domain_id=$1 AND user_id=$2 AND search_vector @@ plainto_tsquery('english',$3)
+ORDER BY ts_rank_cd(search_vector, plainto_tsquery('english',$3), 32) DESC, date DESC
+```
+
+`plainto_tsquery('english', $3)` is computed twice per query (once in `WHERE`, once in `ORDER BY`). The `search_vector` column is indexed with GIN, but `ts_rank_cd` with a dynamic query is not free. A pre-computed `tsquery` parameter would help.
+
+### 29. IMAP `Expunge` iterates entire mailbox in batches
+**File:** `internal/imap/backend.go`  
+`Expunge` loads every message in the mailbox (in batches of `maxIMAPBatchSize`) to check for the `\Deleted` flag. For a mailbox with 50,000 messages, this is 50 round-trips to PostgreSQL. A single query filtering on the deleted flag would be dramatically faster.
+
+### 30. Attachment data loaded inline with message queries
+**File:** `internal/mailstore/pgstore.go`  
+The `messages` table stores `source BYTEA NOT NULL`. Every `ListMessages` query fetches the full raw source for every message. For a 50MB email, listing 50 messages transfers 2.5GB from Postgres to the app server even though the source is rarely needed in list views.
+
+### 31. No connection pooling limits for SMTP/IMAP
+**File:** `internal/smtp/smtp.go`, `internal/imap/imap.go`  
+Neither server sets a maximum connection limit or read/write timeout on individual client connections. A slowloris-style attack or thousands of idle IMAP connections could exhaust file descriptors.
+
+---
+
+## Error Handling & Observability
+
+### 32. Error suppression via `_ =` is pervasive
+**Files:** Across the entire backend  
+Dozens of errors are explicitly discarded. Examples:
+- `cmd/admin/main.go`: `_, _ = pool.Exec(ctx, ...)` when seeding labels
+- `internal/imap/backend.go`: `flagMap, _ = m.backend.store.GetFlagsBatch(...)`
+- `internal/imap/backend.go`: `_ = m.backend.store.UpdateMessage(...)` during flag operations
+- `internal/imap/backend.go`: `_ = m.backend.store.ClearFlag(...)` during `SetFlags`
+- `internal/dav/dav.go`: `_ = enc.Encode(card)`
+- `internal/auth/auth.go`: `_, _ = s.pool.Exec(ctx, ...)` for session last-used
+
+This pattern makes production debugging extremely difficult because failures are invisible.
+
+### 33. Context values use unexported string type but could collide
+**File:** `internal/api/middleware.go`
+
+```go
+type ctxKey string
+const (
+    ctxKeyUser      ctxKey = "user"
+    ctxKeyDomainID  ctxKey = "domain_id"
+    ctxKeyRequestID ctxKey = "request_id"
+)
+```
+
+While `ctxKey` is a custom type (good), the underlying string values are common names. If any third-party middleware uses the same string value with a different type, `context.Value` lookups will silently return nil. Best practice is to use an empty struct or a package-private var.
+
+### 34. No structured request logging in webui
+**File:** `internal/webui/router.go`  
+The `structuredLogger` Gin middleware logs method, path, status, and latency but does not include the authenticated user, domain ID, or request ID. This makes it impossible to trace a user's actions across the webui -> API proxy boundary.
+
+---
+
+## Missing Tests & Testability
+
+### 35. Large areas of the backend have zero test coverage
+| Package | Has Tests | Coverage Gaps |
+|---------|-----------|---------------|
+| `internal/postmark` | No | Entire Postmark client wrapper |
+| `internal/search` | No | No-op indexer, no queue behavior |
+| `internal/dav` | No | CardDAV and all CalDAV stubs |
+| `internal/imap` | No | `backend.go` and `imap.go` |
+| `internal/smtp` | Minimal | Only `loginServer` and auth mechanisms |
+| `internal/contacts` | No | CRUD, list, search |
+| `internal/reputation` | No | Greylist, whitelist, blacklist logic |
+| `internal/certmanager` | No | ACME flow, renewal, error paths |
+| `internal/webui` | No | Router, proxy, SSE hub |
+| `internal/workers` | Partial | Only retry/dead-letter tested; no processor logic |
+| `internal/webhook` | Partial | Only dedup tested; no signature verification tests |
+
+### 36. No frontend tests
+**File:** `web/`  
+The React application has zero test files. No unit tests for components, no API mocking, no interaction testing.
+
+### 37. No integration or E2E tests
+There are no tests that verify the full flow: inbound webhook -> worker -> database -> IMAP fetch -> webmail read.
+
+### 38. Test mocks are handwritten and fragile
+**File:** `internal/webmail/webmail_test.go`  
+The `mockStore` is a large, manually maintained struct that must be updated whenever the `mailstore.Store` interface changes. This creates friction for refactoring.
+
+---
+
+## Hardcoded Values & Configuration
+
+### 39. Hardcoded system label colors and names
+**Files:** `cmd/admin/main.go`, `internal/imap/backend.go`, `internal/migrate/migrations/000003_seed_labels.up.sql`
+
+```go
+Color: "#4285f4"
+```
+
+The color `#4285f4` (Google Blue) is hardcoded in three different places for new labels, new mailboxes, and migration seeding. There is no central theme or configuration for label styling.
+
+### 40. Session cookie max-age is hardcoded
+**File:** `internal/api/middleware.go`
+
+```go
+MaxAge: 86400 * 7, // 7 days
+```
+
+This should be driven by `cfg.SessionExpiry`.
+
+### 41. Rate limiter defaults are hardcoded
+**File:** `cmd/server/main.go`
+
+```go
+rateLimiter := api.NewRateLimiter(100, time.Minute)
+```
+
+No environment variable or config file controls the rate limit threshold.
+
+### 42. Webhook dedup TTL is hardcoded
+**File:** `internal/webhook/webhook.go`
+
+```go
+ok, err := h.redis.SetNX(ctx, key, "1", 5*time.Minute).Result()
+```
+
+5 minutes is arbitrary and not configurable.
+
+### 43. IMAP batch size is hardcoded
+**File:** `internal/imap/backend.go`
+
+```go
+const maxIMAPBatchSize = 1000
+```
+
+Not configurable per deployment or per client.
+
+### 44. SMTP message size limit uses config but max attachment size is separate
+**File:** `internal/config/config.go`  
+`MaxMessageSize` (50MB) and `MaxAttachmentSize` (25MB) are configured, but `internal/smtp/smtp.go` only enforces `MaxMessageSize`. The attachment size limit is never checked in the SMTP path.
+
+---
+
+## Frontend Concerns
+
+### 45. XSS risk in `MessageView` body rendering
+**File:** `web/src/components/MessageView.jsx`
+
+```jsx
+<div className="prose max-w-none text-surface-800 whitespace-pre-wrap">
+    {message.body || message.snippet || 'No content'}
+</div>
+```
+
+If `message.body` contains raw HTML (which it does for HTML emails), it is rendered as text due to `whitespace-pre-wrap`, but the API returns `html_body` which is not shown here. However, if the API ever returns HTML directly, this component lacks `dangerouslySetInnerHTML` sanitation. The actual risk is low *currently* because the component shows plain text, but `Compose.jsx` stores `html_body` via `bluemonday` on the backend. The frontend should be explicit about whether it renders HTML or text.
+
+### 46. `Compose.jsx` stores `body` but API expects `html_body` + `plain_text`
+**File:** `web/src/components/Compose.jsx`
+
+```js
+await createDraft({ to, subject, body })
+```
+
+The `body` field is sent to the API, which expects `html_body` and `plain_text`. The API's `createDraft` handler uses `bluemonday.UGCPolicy().Sanitize(req.HTMLBody)`, but the frontend sends `body`, so `req.HTMLBody` will be empty. The draft will have no HTML body.
+
+### 47. No input sanitization on the frontend
+**File:** `web/src/components/Compose.jsx`  
+The `to`, `subject`, and `body` fields are sent directly to the API without any client-side validation beyond HTML5 `type="email"` on the login form. The compose form allows arbitrary strings in the `to` field.
+
+### 48. `alert()` used for user-facing errors
+**File:** `web/src/components/Compose.jsx`, `web/src/components/Calendar.jsx`
+
+```js
+alert('Failed to send: ' + (err.response?.data?.error || err.message))
+```
+
+This is poor UX and can be blocked by browser settings. A toast or inline error component should be used.
+
+### 49. Admin dashboard shows fake system status
+**File:** `web/src/components/Admin.jsx`
+
+```jsx
+<div className="h-2 w-2 rounded-full bg-green-500"></div>
+<span className="text-sm text-surface-700">HTTP Server: Running</span>
+```
+
+These are static HTML elements, not connected to any health endpoint. An operator looking at this dashboard has no actual visibility into system health.
+
+### 50. Calendar component has no backend support
+**File:** `web/src/components/Calendar.jsx`  
+The calendar UI is fully implemented in React, but there is no `internal/calendar` package, no database table for events, and the API endpoints `/calendar/events` are not registered in `cmd/server/main.go`. The frontend calls functions that hit a non-existent API.
+
+### 51. SSE endpoint has no authentication
+**File:** `internal/webui/router.go`, `web/src/sse.js`  
+`/events` is public. Any user (or non-user) can open an SSE connection and receive real-time updates about mailboxes and messages. While the payload is generic, this leaks activity patterns.
+
+---
+
+## Schema & Data Layer
+
+### 52. `messages.source` is `BYTEA NOT NULL` but drafts have no source
+**File:** `internal/migrate/migrations/000001_init.up.sql`  
+The schema requires `source BYTEA NOT NULL`, but `createDraft` in `webmail.go` creates a `models.Message` with `Source: nil`. The insertion will fail unless `pgstore.CreateMessage` silently converts `nil` to `[]byte{}`. It does not appear to, which means draft creation may fail at the database level.
+
+### 53. `messages.mailbox` column is redundant with labels
+**File:** `schema`  
+The schema has both a `mailbox VARCHAR(255)` column and a `message_labels` many-to-many table. The codebase uses `mailbox` for some operations (e.g., `MoveToMailbox`) and labels for others. This dual system is confusing and likely to drift.
+
+### 54. `threads.message_ids` is a `TEXT[]` without ordering guarantees
+**File:** `schema`  
+The `message_ids` array is appended with `array_append`, but PostgreSQL arrays preserve insertion order. The concern is that there is no `message_threads` junction table, so querying messages by thread requires either joining on `subject_hash` or loading the array and querying individually.
+
+### 55. `contacts` table has no indexing on `name`
+**File:** `schema`  
+`contacts` has indexes on `email` and the composite `(domain_id, user_id, email)`, but no index on `name`. The `List` query sorts by `name ASC`, which requires a full sort operation for large contact lists.
+
+### 56. `delivery_logs.details` uses `JSONB` but `bounce_events` uses separate columns
+**File:** `schema`  
+Inconsistent patterns: delivery status details are stored in a JSONB blob, while bounce metadata has dedicated columns. This makes querying and reporting harder.
+
+### 57. No foreign key from `attachments` to `messages` with `ON DELETE CASCADE` verification
+**File:** `schema`  
+The FK exists and has `ON DELETE CASCADE`, which is correct, but there is no application-level cleanup for orphaned attachment files if the database is manipulated directly or if a migration is rolled back incorrectly.
+
+---
+
+## Summary by Severity
+
+| Severity | Count | Top Categories |
+|----------|-------|--------------|
+| Critical | 4 | Security (SQLi, auth, CSRF), Data integrity (batch silent failures) |
+| High | 8 | Performance (N+1, full source fetch), Bugs (ignore criteria, thread loading), Missing tests |
+| Medium | 18 | Error suppression, Hardcoded values, No-op implementations, Frontend/API mismatches |
+| Low | 27 | UX polish, logging gaps, naming inconsistencies, missing indexes |
+
+---
+
+*End of report*
