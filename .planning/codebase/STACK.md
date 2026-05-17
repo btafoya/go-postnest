@@ -1,133 +1,100 @@
-# Technology Stack — PostNest
+# Technology Stack
 
-## Language & Runtime
+**Analysis Date:** 2025-07-28
 
-| Item | Version / Details |
-|------|-------------------|
-| **Language** | Go 1.25 |
-| **Module path** | `github.com/go-postnest/postnest` |
-| **Build mode** | `CGO_ENABLED=0` static binaries |
-| **Base image** | `gcr.io/distroless/static-debian12:nonroot` (server, worker, migrate) |
-| **Builder image** | `golang:1.25-alpine` |
+## Languages
 
-## Application Binaries
+**Primary:**
+- Go 1.25.0 — All application code (`go 1.25.0` in `go.mod`)
 
-Three binaries are produced from `cmd/`:
+**Secondary:**
+- Shell (Bash) — Installation and deployment scripts (`scripts/install-systemd.sh`, `scripts/install-docker.sh`)
+- Nix — Declarative packaging and NixOS module (`flake.nix`, `nix/module.nix`)
+- TOML — Application configuration format (`postnest.conf`)
+- SQL — PostgreSQL schema and migrations (`migrations/`)
 
-- **`postnest-server`** — HTTP REST + WebDAV/CardDAV/CalDAV + IMAP + SMTP
-- **`postnest-worker`** — Redis-backed background job processors
-- **`postnest-migrate`** — Embedded SQL migration runner
+## Runtime
 
-## Core Frameworks & Libraries
+**Environment:**
+- Go 1.25+ (no browser runtime; server-side only)
+- CGO disabled for container builds (`CGO_ENABLED=0`)
 
-### HTTP & Routing
-- **`github.com/go-chi/chi/v5`** — Router and middleware chain
+**Package Manager:**
+- Go Modules (`go.mod`, `go.sum` present)
+- Multi-stage Docker builds using `golang:1.25-alpine` → `gcr.io/distroless/static-debian12:nonroot`
 
-### Email Protocols
-- **`github.com/emersion/go-imap`** — IMAP4rev1 server (backend, IDLE, SEARCH, FETCH, APPEND, EXPUNGE, COPY)
-- **`github.com/emersion/go-smtp`** — SMTP submission server
-- **`github.com/emersion/go-sasl`** — SASL authentication (PLAIN, LOGIN)
-- **`github.com/emersion/go-message`** — MIME parsing and RFC822 generation
+## Frameworks
 
-### DAV & Contacts
-- **`github.com/emersion/go-webdav`** — WebDAV framework (CardDAV + CalDAV stubs)
-- **`github.com/emersion/go-vcard`** — vCard 4.0 parsing/serialization
-- **`github.com/emersion/go-ical`** — iCalendar parsing (CalDAV dependency)
+**Core:**
+- `github.com/go-chi/chi/v5` v5.2.5 — HTTP router and middleware
+- `github.com/emersion/go-imap` v1.2.1 — IMAP4rev1 server implementation
+- `github.com/emersion/go-smtp` v0.24.0 — SMTP submission server
+- `github.com/emersion/go-webdav` v0.7.0 — WebDAV/CardDAV/CalDAV handlers
+- `github.com/emersion/go-message` v0.18.2 — MIME message parsing (RFC822)
+- `github.com/emersion/go-vcard` — vCard 4.0 contact serialization
+- `github.com/emersion/go-ical` — iCalendar parsing (used in CalDAV stub)
+- `github.com/emersion/go-sasl` — SASL authentication for SMTP
 
-### Database & Migrations
-- **`github.com/jackc/pgx/v5`** — PostgreSQL driver and connection pool (`pgxpool`)
-- **`github.com/golang-migrate/migrate/v4`** — Schema migrations with embedded SQL (`embed.FS`)
-- **`github.com/lib/pq`** — Indirect dependency (used by migrate)
+**Testing:**
+- Go standard `testing` package
+- `github.com/alicebob/miniredis/v2` v2.38.0 — In-memory Redis for integration tests
 
-### Cache & Queues
-- **`github.com/redis/go-redis/v9`** — Redis client (job queues, IMAP IDLE pub/sub)
+**Build/Dev:**
+- Go toolchain (`go build`, `go test`)
+- `github.com/golang-migrate/migrate/v4` v4.19.1 — Database migration runner (embedded in `cmd/migrate`)
+- Docker Compose — Local orchestration of PostgreSQL, Redis, server, worker, and migration services
 
-### External Services
-- **`github.com/mrz1836/postmark`** — Postmark REST API client (outbound send)
-- **`github.com/go-acme/lego/v4`** — ACME/Let's Encrypt certificate lifecycle
-  - `certcrypto`, `certificate`, `lego`, `registration`
-  - DNS-01 provider: `providers/dns/cloudflare`
+## Key Dependencies
 
-### Security & Crypto
-- **`golang.org/x/crypto`** — Argon2id password hashing
-- Standard library: `crypto/tls`, `crypto/sha256`, `crypto/rand`
+**Critical:**
+- `github.com/jackc/pgx/v5` v5.9.2 — PostgreSQL driver and connection pool
+- `github.com/redis/go-redis/v9` v9.19.0 — Redis client (job queues, IMAP IDLE pub/sub)
+- `github.com/mrz1836/postmark` v1.9.2 — Postmark email API client (inbound/outbound)
+- `github.com/go-acme/lego/v4` v4.35.2 — ACME/Let's Encrypt certificate automation
+- `github.com/golang-migrate/migrate/v4` v4.19.1 — Database migration framework
 
-### Utilities
-- **`github.com/google/uuid`** — UUID generation and parsing
-- **`github.com/BurntSushi/toml`** — TOML configuration parsing
-- **`log/slog`** — Structured JSON logging (standard library)
-
-### Indirect Dependencies
-- `github.com/cenkalti/backoff/v5`, `github.com/cespare/xxhash/v2`, `github.com/go-jose/go-jose/v4`
-- `github.com/miekg/dns` — DNS resolution (ACME/lego)
-- `github.com/teambition/rrule-go` — Recurrence rules (ical)
-- `github.com/microcosm-cc/bluemonday` — HTML sanitization (indirect)
-
-## Datastores
-
-### PostgreSQL 16+
-- **Primary datastore** for all persistent data
-- **Extensions used:**
-  - `pgcrypto` — UUID generation
-  - `pg_trgm` — Trigram similarity
-- **Full-text search:** `tsvector`/`tsquery` with weighted ranks (A=subject, B=from, C=body, D=to)
-- **Trigger:** `messages_update_search_vector()` (BEFORE INSERT OR UPDATE)
-- **Indexes:** GIN on `search_vector`, composite on `(domain_id, user_id, ...)`, partial indexes on `postmark_message_id`
-
-### Redis 7+
-- **Background job queue** — Redis lists (`LPush` / `BRPop`)
-- **Delayed jobs** — Redis sorted sets (`ZAdd` / `ZRangeByScore`)
-- **Dead-letter queue** — Failed job retry exhaustion
-- **IMAP IDLE pub/sub** — `Publish`/`Subscribe` for mailbox change notifications
+**Infrastructure:**
+- `github.com/go-chi/chi/v5` v5.2.5 — HTTP routing and middleware
+- `github.com/google/uuid` v1.6.0 — UUID v7 generation
+- `github.com/BurntSushi/toml` v1.6.0 — TOML configuration parsing
+- `golang.org/x/crypto` v0.51.0 — Argon2id password hashing
+- `github.com/microcosm-cc/bluemonday` v1.0.27 — HTML sanitization for inbound mail
 
 ## Configuration
 
-### Sources (precedence: env overrides > TOML file > defaults)
-1. **TOML file** — `/etc/postnest/postnest.conf` (or `POSTNEST_CONFIG_PATH`)
-2. **Environment variables** — `POSTNEST_<SECTION>_<KEY>` (e.g., `POSTNEST_DATABASE_DSN`)
-3. **Legacy env vars** — Backward-compatible names (`POSTGRES_DSN`, `SESSION_KEY`, etc.)
+**Environment:**
+- Primary: TOML file at `/etc/postnest/postnest.conf` (or path via `POSTNEST_CONFIG_PATH`)
+- Override: All TOML values overridable via `POSTNEST_<SECTION>_<KEY>` environment variables
+- Legacy support: Pre-TOML env var names (e.g., `POSTGRES_DSN`, `SESSION_KEY`) still honored
+- Docker Compose: `.env` file sourced from `.env.example`
 
-### Config sections
-- `[server]` — HTTP/IMAP/SMTP listen addresses, timeouts, CORS origins
-- `[database]` — DSN, read replica DSN, max connections
-- `[redis]` — Connection URL
-- `[tls]` — Certificate/key paths
-- `[acme]` — Automated TLS (email, domain, directory, DNS provider, renew intervals)
-- `[worker]` — Concurrency and poll interval
-- `[security]` — Session key, Argon2id params, max message/attachment sizes
-- `[postmark]` — Webhook secret
+**Key Required Configs:**
+- `POSTNEST_DATABASE_DSN` — PostgreSQL connection string
+- `POSTNEST_SECURITY_SESSION_KEY` — Secret key for session signing
+- `POSTNEST_POSTMARK_WEBHOOK_SECRET` — Postmark webhook signature verification
 
-## Build & Deployment Artifacts
+**Build:**
+- `go.mod` / `go.sum` — Dependency management
+- `docker-compose.yml` — Local service orchestration
+- `Dockerfile.server` / `Dockerfile.worker` / `Dockerfile.migrate` — Multi-stage container builds
+- `flake.nix` + `nix/module.nix` — Nix package and NixOS module
 
-### Docker Compose (`docker-compose.yml`)
-| Service | Image / Build | Ports | Purpose |
-|---------|---------------|-------|---------|
-| `postgres` | `postgres:16-alpine` | — | Primary database |
-| `redis` | `redis:7-alpine` | — | Cache & job queue |
-| `server` | `Dockerfile.server` | 8080, 143, 587 | HTTP + IMAP + SMTP |
-| `worker` | `Dockerfile.worker` | — | Background workers |
-| `migrate` | `Dockerfile.migrate` | — | One-shot migrations |
+## Platform Requirements
 
-### Dockerfiles
-- Multi-stage: `golang:1.25-alpine` builder → `distroless/static-debian12:nonroot`
-- Exposed ports in server image: `8080 143 587 993 465`
+**Development:**
+- macOS/Linux/Windows with Go 1.25+
+- PostgreSQL 16+ (local or Docker)
+- Redis 7+ (local or Docker)
+- Postmark account for email transport
 
-### Nix
-- **`flake.nix`** — Dev shell, package derivations, NixOS module entrypoint
-- **`nix/module.nix`** — NixOS service declarations for server, worker, migrate
+**Production:**
+- Docker Compose stack (PostgreSQL, Redis, server, worker sidecars)
+- Native systemd Linux service (see `scripts/install-systemd.sh`)
+- NixOS module (declarative, see `nix/module.nix`)
+- Distroless container images (`gcr.io/distroless/static-debian12:nonroot`)
+- Exposed ports: HTTP 8080, IMAP 143/993, SMTP 587/465
 
-### Scripts
-- `scripts/install-docker.sh` — Docker Compose bootstrap
-- `scripts/install-systemd.sh` — Native systemd unit installation (Linux)
+---
 
-## Testing Utilities
-- **`github.com/alicebob/miniredis/v2`** — In-memory Redis for unit tests
-- Standard `testing` package with `httptest`
-
-## Schema Migrations (Embedded)
-Files under `internal/migrate/migrations/`:
-1. `000001_init.up.sql` — Core schema (domains, users, messages, labels, contacts, reputation, delivery logs, webhook events, bounce events)
-2. `000002_fts.up.sql` — `pg_trgm` extension + `messages_update_search_vector()` function
-3. `000003_seed_labels.up.sql` — System labels (INBOX, SENT, DRAFTS, TRASH, JUNK, IMPORTANT, STARRED, ALL_MAIL)
-4. `000004_fts_trigger.up.sql` — Trigger binding search vector function to messages table
-5. `000005_search_composite.up.sql` — Composite index `messages(domain_id, user_id)`
+*Stack analysis: 2025-07-28*
+*Update after major dependency changes*

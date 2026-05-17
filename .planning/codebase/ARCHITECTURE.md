@@ -1,180 +1,180 @@
-# Postnest Architecture
+# Architecture
 
-## Overview
+**Analysis Date:** 2025-06-10
 
-Postnest is a Go-based email platform that provides webmail, IMAP/SMTP access, CardDAV contacts, and webhook-driven mail processing. It acts as a domain-aware mail host backed by Postmark for outbound delivery and inbound ingestion.
+## Pattern Overview
 
-## Architectural Patterns
+**Overall:** Multi-Protocol Monolithic Service with Background Workers
 
-### Layered Hexagonal-ish Design
-The codebase follows a layered pattern with explicit interfaces at storage boundaries:
+**Key Characteristics:**
+- Three separate binaries (`server`, `worker`, `migrate`) sharing `internal/` packages
+- Protocol-layer servers (IMAP, SMTP, HTTP) co-located in a single process
+- PostgreSQL as the single source of truth; Redis for queues and pub/sub
+- Multi-tenant by domain; users belong to one or more domains
+- Background job processing via Redis-backed worker pool
 
-- **Transport layer** (`cmd/server`, `cmd/worker`): Entry points that wire dependencies.
-- **Handler layer** (`internal/api`, `internal/webmail`, `internal/webhook`, `internal/dav`, `internal/imap`, `internal/smtp`): Protocol-specific adapters.
-- **Service layer** (`internal/auth`, `internal/reputation`): Domain logic, authentication, and policy engines.
-- **Store layer** (`internal/mailstore`, `internal/contacts`): Persistence interfaces with PostgreSQL implementations.
-- **Infrastructure layer** (`internal/db`, `internal/redis`, `internal/postmark`, `internal/certmanager`, `internal/logger`): External systems and shared utilities.
+## Layers
 
-### Interface-Driven Stores
-Storage is abstracted behind Go interfaces:
-- `mailstore.Store` — message, label, thread, attachment, delivery log, and search operations.
-- `contacts.Store` — CRUD for address book entries.
+**Transport Layer (Protocol Servers):**
+- Purpose: Accept client connections over IMAP4rev1, SMTP, and HTTP
+- Contains: IMAP server (`internal/imap`), SMTP server (`internal/smtp`), HTTP router (`cmd/server/main.go`)
+- Depends on: Service layer (`auth`, `mailstore`), API middleware (`internal/api`)
+- Used by: External email clients, web browsers, DAV clients
 
-This allows the same business logic to be exercised by HTTP handlers, IMAP backends, SMTP backends, and background workers without coupling to PostgreSQL.
+**Handler Layer (Route/Request Handlers):**
+- Purpose: HTTP route handlers for webmail API, webhooks, and DAV
+- Contains: `internal/webmail`, `internal/webhook`, `internal/dav`
+- Depends on: Service layer (`auth`, `mailstore`, `contacts`), `internal/api` middleware
+- Used by: Transport layer (chi router in `cmd/server/main.go`)
 
-### Dependency Injection via Constructor Functions
-Every component is initialized in `main()` and wired together explicitly:
-```
-db.Pool -> auth.Service -> mailstore.PGStore -> webmail.Handler
-```
-There is no global state, no service locator, and no magic container.
+**Service Layer (Business Logic):**
+- Purpose: Core domain operations—authentication, mail persistence, contact management, reputation evaluation
+- Contains: `internal/auth`, `internal/mailstore`, `internal/contacts`, `internal/reputation`, `internal/search`
+- Depends on: Database (`internal/db`), models (`internal/models`), external APIs (`internal/postmark`)
+- Used by: Handler layer, protocol servers, background workers
 
-### Config Cascade
-Configuration is loaded in three stages:
-1. Hard-coded defaults in `internal/config/loader.go`.
-2. TOML file at `/etc/postnest/postnest.conf` (or `POSTNEST_CONFIG_PATH`).
-3. Environment variable overrides with `POSTNEST_<SECTION>_<KEY>` naming and legacy fallback mapping.
+**Data/Integration Layer:**
+- Purpose: Persistence, caching, external API clients, and infrastructure concerns
+- Contains: `internal/db` (pgxpool wrapper), `internal/redis` (go-redis wrapper), `internal/postmark` (Postmark API client), `internal/certmanager` (ACME/Let's Encrypt)
+- Depends on: External systems (PostgreSQL, Redis, Postmark API, ACME providers)
+- Used by: Service layer, transport layer, workers
+
+**Worker Layer (Background Processing):**
+- Purpose: Async job processing for inbound mail, bounces, delivery tracking, spam evaluation, search indexing, and draft sending
+- Contains: `internal/workers` (pool orchestration + processors)
+- Depends on: Service layer (`mailstore`, `auth`, `reputation`, `postmark`), `internal/redis`
+- Used by: Webhook receiver enqueues jobs; worker binary dequeues and processes
+
+**Foundation Layer:**
+- Purpose: Shared types, configuration, logging, and API primitives
+- Contains: `internal/models`, `internal/config`, `internal/logger`, `internal/api` (errors, middleware)
+- Depends on: Standard library and third-party utilities
+- Used by: All other layers
 
 ## Data Flow
 
-### Inbound Mail (Postmark Webhook)
-```
-Postmark Inbound Webhook
-    -> POST /webhooks/postmark/inbound
-    -> webhook.Handler (dedup via Redis, enqueue)
-    -> Redis queue:jobs
-    -> worker Pool (InboundProcessor)
-    -> reputation.Engine.EvaluateInbound (whitelist/blacklist/greylist)
-    -> mailstore.PGStore.CreateMessage
-    -> PostgreSQL (messages, message_labels, attachments, threads)
-    -> search vector update
-```
+**Outbound Mail (SMTP Client → Postmark):**
 
-### Outbound Mail (SMTP Client Submission)
-```
-SMTP client (Thunderbird, etc.)
-    -> SMTP server (go-smtp)
-    -> smtpBackend.Auth (PLAIN / LOGIN via auth.Service)
-    -> smtpBackend.Mail (domain membership check)
-    -> smtpBackend.Data (parse MIME, extract text/html/attachments)
-    -> postmark.Client.SendEmail
-    -> Postmark API
-    -> mailstore.PGStore.CreateMessage (SENT label)
-```
+1. Email client opens SMTP connection to `internal/smtp` (port 587/465)
+2. `smtpBackend` authenticates via `auth.Service` (Argon2id password verification)
+3. Client sends `MAIL FROM`, `RCPT TO`, `DATA`
+4. `smtpSession.Data` parses MIME message, extracts text/html parts and attachments
+5. Message stored in `mailstore` as draft with `SENT` label
+6. `postmark.Client.SendEmail` relays to Postmark API
+7. Delivery log created; worker later polls for status updates
 
-### Outbound Draft Send (Web)
-```
-Web client
-    -> POST /api/v1/drafts/{id}/send
-    -> webmail.Handler.sendDraft
-    -> Redis queue:jobs (job type: send_draft)
-    -> worker Pool (SendProcessor)
-    -> postmark.Client.SendEmail
-    -> mailstore.PGStore.UpdateMessage (clear IsDraft, set IsOutbound, mailbox=SENT)
-    -> mailstore.PGStore.CreateDeliveryLog
-```
+**Inbound Mail (Postmark → IMAP/Webmail Client):**
 
-### Bounce / Delivery Tracking
-```
-Postmark Webhook (bounce or delivery)
-    -> POST /webhooks/postmark/{bounce,delivery}
-    -> webhook.Handler (dedup, enqueue)
-    -> worker Pool (BounceProcessor / DeliveryProcessor)
-    -> PostgreSQL delivery_logs UPDATE
-```
+1. Postmark delivers inbound email via HTTP POST to `internal/webhook`
+2. Webhook validates HMAC-SHA256 signature (or server-token fallback)
+3. Webhook enqueues `inbound` job to Redis queue (`queue:jobs`)
+4. `InboundProcessor` worker dequeues job, parses RFC822 payload
+5. `mailstore.CreateMessage` writes message, attachments, labels, thread
+6. `reputation.Engine.EvaluateInbound` runs whitelist/blacklist/greylist rules
+7. Redis pub/sub notifies IMAP IDLE clients of new mail
+8. Webmail client sees new message on next API poll
 
-### IMAP Access
-```
-IMAP client
-    -> IMAP server (go-imap)
-    -> imapBackend.Login -> auth.Service.Authenticate
-    -> imapUser.ListMailboxes -> mailstore.GetLabels
-    -> imapMailbox.ListMessages -> mailstore.ListMessages
-    -> PostgreSQL
-```
+**Webmail Read (Browser → REST API):**
 
-### CardDAV Access
-```
-CardDAV client
-    -> HTTP Basic Auth -> auth.Service.Authenticate
-    -> carddav.Handler -> carddavBackend
-    -> contacts.Store (PGStore)
-    -> PostgreSQL (contacts table)
-```
+1. Browser sends `GET /api/v1/messages?label_id=...` with session cookie
+2. `api.RequireSession` middleware validates session or Bearer token via `auth.Service`
+3. `webmail.Handler.listMessages` resolves domain/user from context
+4. `mailstore.ListMessages` queries PostgreSQL with pagination
+5. JSON response returned with messages and total count
 
-## Entry Points
+**DAV Contact Sync (macOS/iOS → CardDAV):**
 
-### cmd/server/main.go
-Wires and starts all long-running server processes:
-1. Loads config.
-2. Opens PostgreSQL pool and Redis client.
-3. Constructs `auth.Service`, `mailstore.PGStore`, `contacts.PGStore`.
-4. Starts HTTP server (Chi) with middleware, health checks, webmail API, admin API, webhook routes, DAV routes.
-5. Configures TLS strategy (ACME, static cert, or plaintext).
-6. Starts IMAP server.
-7. Starts SMTP server.
-8. Blocks on OS signal, then gracefully shuts down all subsystems.
-
-### cmd/worker/main.go
-Wires and starts the background job pool:
-1. Loads config.
-2. Opens PostgreSQL pool and Redis client.
-3. Constructs `auth.Service`, `mailstore.PGStore`, `reputation.Engine`.
-4. Creates `workers.Pool` with concurrency and poll interval.
-5. Registers processors: `inbound`, `bounce`, `delivery`, `send_draft`, `spam`.
-6. Starts pool (blocking).
-7. On OS signal, stops pool with timeout.
+1. DAV client sends PROPFIND/REPORT to `/.well-known/carddav`
+2. `internal/dav` auth middleware validates Basic/Bearer credentials
+3. `carddavBackend` routes to `contacts.Store` CRUD operations
+4. Contacts stored/retrieved as vCard in PostgreSQL
 
 ## Key Abstractions
 
-### mailstore.Store
-The canonical storage interface for the mail subsystem. It exposes operations for messages, labels, threads, attachments, flags, and full-text search. All protocol handlers (HTTP, IMAP, SMTP) and workers program against this interface.
+**Service:**
+- Purpose: Encapsulate business logic for a domain
+- Examples: `auth.Service` (`internal/auth/auth.go`), `reputation.Engine` (`internal/reputation/reputation.go`)
+- Pattern: Constructor-injected `*pgxpool.Pool`; methods accept `context.Context`
 
-### auth.Service
-Central identity and session manager. Handles Argon2id password hashing, session/API-key generation, validation, and domain membership/role checks. Used by HTTP middleware, IMAP/SMTP backends, and worker processors.
+**Store (Repository Pattern):**
+- Purpose: Abstract persistence behind an interface
+- Examples: `mailstore.Store` (`internal/mailstore/mailstore.go`), `contacts.Store` (`internal/contacts/contacts.go`)
+- Pattern: Interface + PostgreSQL implementation (`PGStore`); no mocking stubs in production
 
-### workers.Pool / Processor
-A Redis-backed job queue with pluggable processors. Each job type maps to a `Processor` implementation. The pool supports delayed retries, dead-lettering, and concurrent workers.
+**Handler:**
+- Purpose: HTTP request handling for a domain
+- Examples: `webmail.Handler` (`internal/webmail/webmail.go`), `webhook.Handler` (`internal/webhook/webhook.go`)
+- Pattern: Struct with service dependencies; `RegisterRoutes(r chi.Router)` method
 
-### postmark.Client
-Thin wrapper around the `mrz1836/postmark` library. Normalizes send requests and inbound payload parsing. Isolates the rest of the codebase from Postmark-specific types.
+**Processor:**
+- Purpose: Background job handler
+- Examples: `InboundProcessor`, `BounceProcessor`, `SendProcessor` (`internal/workers/*.go`)
+- Pattern: Implements `workers.Processor` interface; registered by job type in `cmd/worker/main.go`
 
-### certmanager.Manager
-ACME certificate lifecycle using `lego`. Handles account registration, DNS-01 challenge (Cloudflare), certificate obtainment, loading, and background renewal. Exposes `GetCertificate` for `tls.Config`.
+**Server Wrapper:**
+- Purpose: Wrap third-party protocol servers with unified lifecycle
+- Examples: `imap.Server` (`internal/imap/imap.go`), `smtp.Server` (`internal/smtp/smtp.go`)
+- Pattern: Struct wrapping `go-imap`/`go-smtp` server; `Start()`/`Stop()` methods; TLS config injection
 
-## Middleware Stack (HTTP)
+## Entry Points
 
-Applied in order:
-1. `api.RequestID` — injects/copies `X-Request-ID`.
-2. `api.StructuredLogger` — JSON request logging via `slog`.
-3. `api.Recovery` — catches panics, returns 500.
-4. `api.CORS` — origin-restricted CORS headers.
-5. `api.RateLimiter` — per-IP token-bucket rate limiting (100/min) with periodic stale-entry cleanup.
-6. `api.RequireSession` — Bearer or cookie session validation.
-7. `api.RequireDomainAdmin` — domain-scoped RBAC.
+**Server Entry (`cmd/server/main.go`):**
+- Location: `cmd/server/main.go`
+- Triggers: Direct execution or container start
+- Responsibilities: Load config, open PostgreSQL + Redis connections, wire all services, start HTTP/IMAP/SMTP/DAV servers, handle graceful shutdown
 
-## Authentication Models
+**Worker Entry (`cmd/worker/main.go`):**
+- Location: `cmd/worker/main.go`
+- Triggers: Direct execution or container start
+- Responsibilities: Load config, open connections, create `workers.Pool`, register all processors, start consuming jobs, handle shutdown
 
-- **Session cookie** (`HttpOnly`, `Secure`, `SameSite=Lax`) for browser clients.
-- **Bearer token** (`Authorization: Bearer <token>`) for API clients.
-- **Basic Auth** for DAV endpoints.
-- **SMTP AUTH** (PLAIN, LOGIN) for mail submission.
+**Migrate Entry (`cmd/migrate/main.go`):**
+- Location: `cmd/migrate/main.go`
+- Triggers: CLI invocation (`postnest-migrate up|down|version|force`)
+- Responsibilities: Load config, apply/rollback embedded SQL migrations via `golang-migrate`
 
-Tokens are 32-byte random values stored as SHA-256 hashes in `auth_sessions`. Two session types exist: `session` and `api_key`.
+## Error Handling
 
-## Database Patterns
+**Strategy:** Typed application errors at service boundary; HTTP status mapping in `internal/api/errors.go`; panics recovered by middleware
 
-- **Raw SQL with pgx**: No ORM. Queries are hand-written, parameterized, and scanned into `internal/models` structs.
-- **Transactions**: Critical paths (message creation with labels/attachments, label application) use explicit `pgx.Tx` with deferred rollback.
-- **CopyFrom**: Bulk attachment inserts use `pgx.CopyFrom` for efficiency.
-- **Full-text search**: PostgreSQL `tsvector` with weighted fields (subject A, from B, plain text C, to D).
-- **Migrations**: Embedded SQL files via `golang-migrate/migrate` and `embed.FS`.
+**Patterns:**
+- `api.AppError` carries `Code`, `Message`, `StatusCode`, and optional `FieldError` details
+- `api.WriteError(w, err)` inspects error type and writes appropriate JSON response
+- `api.Recovery` middleware catches panics, logs stack trace, returns 500
+- `mailstore.ErrNotFound` sentinel for missing records
+- Workers log errors and retry with exponential backoff (max 3 attempts), then dead-letter
 
-## Security Considerations
+## Cross-Cutting Concerns
 
-- Passwords hashed with **Argon2id** (configurable time, memory, threads).
-- Rate limiting at the HTTP edge.
-- HTML sanitization via `bluemonday.UGCPolicy` for inbound HTML and drafts.
-- Reputation engine evaluates whitelist, blacklist, and greylist for inbound messages.
-- SMTP sessions require authentication and domain authorization before accepting mail.
-- TLS is strongly encouraged: ACME or static certificates; plaintext mode allows insecure auth only for local testing.
+**Logging:**
+- `internal/logger` produces structured JSON `slog.Logger`
+- Injected into all services and handlers
+- Request logging via `api.StructuredLogger` middleware (method, path, duration, request_id)
+
+**Authentication:**
+- Session cookies (`HttpOnly`, `Secure`, `SameSite=Lax`) or Bearer tokens
+- `api.RequireSession` middleware validates via `auth.Service.ValidateSession` / `ValidateAPIKey`
+- `api.RequireDomainAdmin` middleware for admin routes
+- Argon2id for passwords, SHA-256 hash for session tokens
+
+**Validation:**
+- Manual validation in handlers (e.g., UUID parsing, required fields)
+- `api.NewValidationError` for structured field-level errors
+
+**Rate Limiting:**
+- `api.RateLimiter` middleware: token-bucket per IP, 100 req/min default
+- Periodic stale-entry cleanup to prevent unbounded map growth
+
+**TLS/ACME:**
+- Static TLS certs, ACME/Let's Encrypt with DNS-01, or unencrypted (dev only)
+- `certmanager.Manager` handles certificate lifecycle and renewal
+
+**Multi-Tenancy:**
+- All data scoped by `domain_id` and `user_id`
+- `domain_members` table links users to domains with roles (`admin`, `member`)
+- `IsSuperAdmin` flag bypasses domain checks
+
+---
+
+*Architecture analysis: 2025-06-10*
+*Update when major patterns change*
