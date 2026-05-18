@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -115,6 +114,7 @@ func main() {
 
 	adminStore := admin.NewPGStore(pgPool.Pool)
 	adminHandler := admin.NewHandler(adminStore, authService)
+	healthHandler := admin.NewHealthHandler(pgPool.Pool, redisClient, imapAddr, smtpAddr, authService, mailStore)
 
 	// Admin API routes
 	r.Group(func(r chi.Router) {
@@ -122,40 +122,7 @@ func main() {
 		r.Use(api.CSRF)
 		r.Use(api.RequireDomainAdmin(authService))
 		adminHandler.RegisterRoutes(r)
-		r.Get("/admin/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
-			comp := func(probe func() error) map[string]any {
-				start := time.Now()
-				if err := probe(); err != nil {
-					return map[string]any{"status": "down", "error": err.Error()}
-				}
-				return map[string]any{"status": "up", "latency_ms": time.Since(start).Milliseconds()}
-			}
-			dialTCP := func(addr string) func() error {
-				return func() error {
-					c, err := net.DialTimeout("tcp", addr, 2*time.Second)
-					if err != nil {
-						return err
-					}
-					return c.Close()
-				}
-			}
-			depth, _ := redisClient.UniversalClient.LLen(ctx, "queue:jobs").Result()
-			dead, _ := redisClient.UniversalClient.LLen(ctx, "queue:jobs:dead").Result()
-			activeUsers, _ := authService.CountUsers(ctx)
-			msgToday, _ := mailStore.CountMessagesToday(ctx)
-			totalDomains, _ := authService.CountDomains(ctx)
-			writeJSON(w, http.StatusOK, map[string]any{
-				"database":      comp(func() error { return pgPool.Ping(ctx) }),
-				"redis":         comp(func() error { return redisClient.Ping(ctx).Err() }),
-				"imap":          comp(dialTCP(imapAddr)),
-				"smtp":          comp(dialTCP(smtpAddr)),
-				"worker_queue":  map[string]any{"depth": depth, "dead": dead},
-				"active_users":  activeUsers,
-				"messages_today": msgToday,
-				"total_domains": totalDomains,
-			})
-		})
+		healthHandler.RegisterRoutes(r)
 	})
 
 	srv := &http.Server{
