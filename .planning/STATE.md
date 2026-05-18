@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-05-18T17:19:24.944Z"
-last_activity: 2026-05-18 — Executed 02-01 plan
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-05-18T17:27:57.304Z"
+last_activity: 2026-05-18 — Executed 02-02 plan
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 5
-  completed_plans: 3
-  percent: 60
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-05-18)
 ## Current Position
 
 Phase: 2 of 3 (Backend Logic & Validation)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In progress
-Last activity: 2026-05-18 — Executed 02-01 plan
+Last activity: 2026-05-18 — Executed 02-02 plan
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Progress: [██████░░░░] 60%
 - Trend: fast
 | Phase 01-api-contracts-error-handling P02 | 5min | 3 tasks | 5 files |
 | Phase 02-backend-logic-validation P01 | 300 | 2 tasks | 4 files |
+| Phase 02-backend-logic-validation P02 | 6 | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,10 @@ Recent decisions affecting current work:
 - [Phase 02-backend-logic-validation]: Registered json tag name func on validator so field errors use lowercase snake_case names matching the frontend
 - [Phase 02-backend-logic-validation]: Validate pagination params only when explicitly provided, preserving default limit=20 behavior for absent params
 - [Phase 02-backend-logic-validation]: Map UUID parse failures to api.NewValidationError with field=id and issue=uuid for consistency
+- [Phase 02-backend-logic-validation]: Delegate admin password hashing to auth.Service to eliminate DRY violation for Argon2id parameters
+- [Phase 02-backend-logic-validation]: Use LEFT JOIN in ListUsers to fetch users and memberships in a single query, eliminating N+1 round-trips
+- [Phase 02-backend-logic-validation]: Return pagination metadata (total, limit, offset) from list endpoints to enable frontend pagination controls
+- [Phase 02-backend-logic-validation]: Run separate COUNT(*) queries for total metadata rather than complicating the main SELECT with subqueries
 
 ### Pending Todos
 
@@ -83,6 +88,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-18T17:19:24.943Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-05-18T17:27:57.304Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

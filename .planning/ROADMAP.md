@@ -38,7 +38,7 @@ Plans:
   2. Domain and user list views show correct total counts and load without N+1 query delays.
   3. Health endpoint returns DB, Redis, IMAP, SMTP, and worker queue metrics in a consistent JSON format.
   4. Admin receives clear validation errors for invalid domain names, emails, passwords, pagination params, or malformed UUIDs before any DB write occurs.
-**Plans:** 3
+**Plans:** 2/3 plans executed
 
 Plans:
 - [ ] 02-01: Validation layer with go-playground/validator (VAL-01..VAL-05)
@@ -68,5 +68,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. API Contracts & Error Handling | 2/2 | Complete | 2026-05-18 |
-| 2. Backend Logic & Validation | 0/3 | Planned | - |
+| 2. Backend Logic & Validation | 2/3 | In Progress|  |
 | 3. Frontend Integration & Production Hardening | 0/TBD | Not started | - |

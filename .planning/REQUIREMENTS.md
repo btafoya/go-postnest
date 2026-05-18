@@ -26,17 +26,17 @@
 
 - [x] **VAL-01**: Domain name validated as non-empty string with reasonable length limit
 - [x] **VAL-02**: Email validated with RFC 5322-aware check before store call
-- [ ] **VAL-03**: Password minimum length enforced when `require_strong_passwords` is enabled
+- [x] **VAL-03**: Password minimum length enforced when `require_strong_passwords` is enabled
 - [x] **VAL-04**: Pagination params validated (limit 1-100, offset >= 0)
 - [x] **VAL-05**: UUID path params validated before store calls
 
 ### Backend Logic
 
 - [ ] **LOG-01**: `createUser` creates corresponding `domain_members` row for at least one domain
-- [ ] **LOG-02**: Admin password hashing uses `auth.Service.HashPassword` instead of local hasher
-- [ ] **LOG-03**: `ListUsers` fetches all memberships in single query (fix N+1)
-- [ ] **LOG-04**: `ListDomains` returns pagination metadata (total count)
-- [ ] **LOG-05**: `ListUsers` returns pagination metadata (total count)
+- [x] **LOG-02**: Admin password hashing uses `auth.Service.HashPassword` instead of local hasher
+- [x] **LOG-03**: `ListUsers` fetches all memberships in single query (fix N+1)
+- [x] **LOG-04**: `ListDomains` returns pagination metadata (total count)
+- [x] **LOG-05**: `ListUsers` returns pagination metadata (total count)
 - [ ] **LOG-06**: Health endpoint moved from `cmd/server/main.go` to `internal/admin/health.go`
 
 ### Frontend Integration
@@ -92,14 +92,14 @@
 | PROD-03 | Phase 1 | Complete |
 | VAL-01 | Phase 2 | Complete |
 | VAL-02 | Phase 2 | Complete |
-| VAL-03 | Phase 2 | Pending |
+| VAL-03 | Phase 2 | Complete |
 | VAL-04 | Phase 2 | Complete |
 | VAL-05 | Phase 2 | Complete |
 | LOG-01 | Phase 2 | Pending |
-| LOG-02 | Phase 2 | Pending |
-| LOG-03 | Phase 2 | Pending |
-| LOG-04 | Phase 2 | Pending |
-| LOG-05 | Phase 2 | Pending |
+| LOG-02 | Phase 2 | Complete |
+| LOG-03 | Phase 2 | Complete |
+| LOG-04 | Phase 2 | Complete |
+| LOG-05 | Phase 2 | Complete |
 | LOG-06 | Phase 2 | Pending |
 | FE-01 | Phase 3 | Pending |
 | FE-02 | Phase 3 | Pending |
