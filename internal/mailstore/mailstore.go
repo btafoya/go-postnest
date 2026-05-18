@@ -14,6 +14,7 @@ type ListOptions struct {
 	Offset    int
 	SortField string
 	SortDesc  bool
+	Mailbox   string // system folder filter (e.g. "SENT", "DRAFTS", "TRASH")
 }
 
 

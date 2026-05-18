@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/mail"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,9 +84,26 @@ func (h *Handler) domainID(r *http.Request) uuid.UUID {
 	defer cancel()
 	doms, err := h.auth.GetUserDomains(ctx, u.ID)
 	if err != nil || len(doms) == 0 {
-		return u.ID
+		return uuid.Nil
 	}
 	return doms[0].DomainID
+}
+
+// resolveDomain returns the request's domain ID, or writes a 4xx and
+// returns ok=false when the authenticated user has no domain membership.
+// Mutating handlers MUST guard with this; a Nil domain_id violates the
+// messages_domain_id_fkey constraint.
+func (h *Handler) resolveDomain(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	did := h.domainID(r)
+	if did == uuid.Nil {
+		api.WriteError(w, &api.AppError{
+			Code:       "no_domain",
+			Message:    "User is not a member of any domain",
+			StatusCode: http.StatusForbidden,
+		})
+		return uuid.Nil, false
+	}
+	return did, true
 }
 
 func (h *Handler) listLabels(w http.ResponseWriter, r *http.Request) {
@@ -184,10 +202,16 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	u := h.currentUser(r)
 	q := r.URL.Query()
 	var labelID *uuid.UUID
+	var mailboxFilter string
 	if v := q.Get("label_id"); v != "" {
-		id, err := uuid.Parse(v)
-		if err == nil {
-			labelID = &id
+		switch v {
+		case "sent", "drafts", "trash", "junk":
+			mailboxFilter = strings.ToUpper(v)
+		default:
+			id, err := uuid.Parse(v)
+			if err == nil {
+				labelID = &id
+			}
 		}
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
@@ -197,6 +221,7 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 		Offset:    offset,
 		SortField: q.Get("sort"),
 		SortDesc:  true,
+		Mailbox:   mailboxFilter,
 	})
 	if err != nil {
 		api.WriteError(w, err)
@@ -363,7 +388,10 @@ func (h *Handler) createDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	did := h.domainID(r)
+	did, ok := h.resolveDomain(w, r)
+	if !ok {
+		return
+	}
 	toAddrs := extractAddresses(req.To)
 	ccAddrs := extractAddresses(req.Cc)
 	bccAddrs := extractAddresses(req.Bcc)
@@ -411,7 +439,10 @@ func (h *Handler) updateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	did := h.domainID(r)
+	did, ok := h.resolveDomain(w, r)
+	if !ok {
+		return
+	}
 	toAddrs := extractAddresses(req.To)
 	ccAddrs := extractAddresses(req.Cc)
 	bccAddrs := extractAddresses(req.Bcc)
@@ -463,7 +494,10 @@ func (h *Handler) sendDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := h.currentUser(r)
-	did := h.domainID(r)
+	did, ok := h.resolveDomain(w, r)
+	if !ok {
+		return
+	}
 	msg, err := h.store.GetMessage(r.Context(), did, u.ID, id)
 	if err != nil {
 		api.WriteError(w, err)

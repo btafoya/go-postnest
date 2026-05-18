@@ -131,9 +131,10 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 	var total int64
 	if err := s.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM messages m
-		JOIN message_labels ml ON ml.message_id = m.id
-		WHERE m.domain_id=$1 AND m.user_id=$2 AND ($3::uuid IS NULL OR ml.label_id=$3)
-	`, domainID, userID, labelID).Scan(&total); err != nil {
+		WHERE m.domain_id=$1 AND m.user_id=$2
+			AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM message_labels ml WHERE ml.message_id=m.id AND ml.label_id=$3))
+			AND ($4 = '' OR m.mailbox = $4)
+	`, domainID, userID, labelID, opts.Mailbox).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -173,13 +174,14 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 			m.date, m.plain_text, m.html_body, m.size_bytes,
 			m.is_draft, m.is_outbound, m.is_read, m.is_flagged, m.is_answered, m.created_at, m.updated_at
 		FROM messages m
-		JOIN message_labels ml ON ml.message_id = m.id
-		WHERE m.domain_id=$1 AND m.user_id=$2 AND ($3::uuid IS NULL OR ml.label_id=$3)
+		WHERE m.domain_id=$1 AND m.user_id=$2
+			AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM message_labels ml WHERE ml.message_id=m.id AND ml.label_id=$3))
+			AND ($4 = '' OR m.mailbox = $4)
 		ORDER BY ` + orderBy + `
-		LIMIT $4 OFFSET $5
+		LIMIT $5 OFFSET $6
 	`
 
-	rows, err := s.pool.Query(ctx, query, domainID, userID, labelID, limit, offset)
+	rows, err := s.pool.Query(ctx, query, domainID, userID, labelID, opts.Mailbox, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}

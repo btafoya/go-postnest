@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 )
 
@@ -44,6 +45,7 @@ func NewValidationError(details []FieldError) *AppError {
 func WriteError(w http.ResponseWriter, err error) {
 	var appErr *AppError
 	if !As(err, &appErr) {
+		slog.Error("unhandled error mapped to 500", "err", err)
 		appErr = ErrInternal
 	}
 	w.Header().Set("Content-Type", "application/json")
