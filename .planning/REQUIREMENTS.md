@@ -24,11 +24,11 @@
 
 ### Input Validation
 
-- [ ] **VAL-01**: Domain name validated as non-empty string with reasonable length limit
-- [ ] **VAL-02**: Email validated with RFC 5322-aware check before store call
+- [x] **VAL-01**: Domain name validated as non-empty string with reasonable length limit
+- [x] **VAL-02**: Email validated with RFC 5322-aware check before store call
 - [ ] **VAL-03**: Password minimum length enforced when `require_strong_passwords` is enabled
-- [ ] **VAL-04**: Pagination params validated (limit 1-100, offset >= 0)
-- [ ] **VAL-05**: UUID path params validated before store calls
+- [x] **VAL-04**: Pagination params validated (limit 1-100, offset >= 0)
+- [x] **VAL-05**: UUID path params validated before store calls
 
 ### Backend Logic
 
@@ -90,11 +90,11 @@
 | ERR-05 | Phase 1 | Complete |
 | ERR-06 | Phase 1 | Complete |
 | PROD-03 | Phase 1 | Complete |
-| VAL-01 | Phase 2 | Pending |
-| VAL-02 | Phase 2 | Pending |
+| VAL-01 | Phase 2 | Complete |
+| VAL-02 | Phase 2 | Complete |
 | VAL-03 | Phase 2 | Pending |
-| VAL-04 | Phase 2 | Pending |
-| VAL-05 | Phase 2 | Pending |
+| VAL-04 | Phase 2 | Complete |
+| VAL-05 | Phase 2 | Complete |
 | LOG-01 | Phase 2 | Pending |
 | LOG-02 | Phase 2 | Pending |
 | LOG-03 | Phase 2 | Pending |

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-05-18T13:26:59.834Z"
-last_activity: 2026-05-18 — Executed 01-02 plan
+status: executing
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-05-18T17:19:24.944Z"
+last_activity: 2026-05-18 — Executed 02-01 plan
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 100
+  total_plans: 5
+  completed_plans: 3
+  percent: 60
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-05-18)
 
 ## Current Position
 
-Phase: 1 of 3 (API Contracts & Error Handling)
-Plan: 2 of 2 in current phase
-Status: Phase complete — ready for next phase
-Last activity: 2026-05-18 — Executed 01-02 plan
+Phase: 2 of 3 (Backend Logic & Validation)
+Plan: 1 of 3 in current phase
+Status: In progress
+Last activity: 2026-05-18 — Executed 02-01 plan
 
-Progress: [██████████] 100%
+Progress: [██████░░░░] 60%
 
 ## Performance Metrics
 
@@ -49,6 +49,7 @@ Progress: [██████████] 100%
 - Last 5 plans: 01-01 (3 min), 01-02 (5 min)
 - Trend: fast
 | Phase 01-api-contracts-error-handling P02 | 5min | 3 tasks | 5 files |
+| Phase 02-backend-logic-validation P01 | 300 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,9 @@ Recent decisions affecting current work:
 - [Phase 01-api-contracts-error-handling]: Map PostgreSQL errors to specific HTTP status codes via centralized mapStoreError helper
 - [Phase 01-api-contracts-error-handling]: Return specific validation messages without Details array for direct frontend consumption
 - [Phase 01-api-contracts-error-handling]: Use table-driven tests with chi router and mock store for admin handler coverage
+- [Phase 02-backend-logic-validation]: Registered json tag name func on validator so field errors use lowercase snake_case names matching the frontend
+- [Phase 02-backend-logic-validation]: Validate pagination params only when explicitly provided, preserving default limit=20 behavior for absent params
+- [Phase 02-backend-logic-validation]: Map UUID parse failures to api.NewValidationError with field=id and issue=uuid for consistency
 
 ### Pending Todos
 
@@ -79,6 +83,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-18T13:26:59.831Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-05-18T17:19:24.943Z
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None
