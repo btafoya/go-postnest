@@ -108,18 +108,18 @@ type Thread struct {
 
 // Contact is an address book entry.
 type Contact struct {
-	ID           uuid.UUID
-	DomainID     uuid.UUID
-	UserID       uuid.UUID
-	Email        string
-	Name         string
-	GivenName    string
-	FamilyName   string
-	Organization string
-	Phone        string
-	VCardData    string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID           uuid.UUID `json:"id"`
+	DomainID     uuid.UUID `json:"domain_id"`
+	UserID       uuid.UUID `json:"user_id"`
+	Email        string    `json:"email"`
+	Name         string    `json:"name"`
+	GivenName    string    `json:"given_name"`
+	FamilyName   string    `json:"family_name"`
+	Organization string    `json:"organization"`
+	Phone        string    `json:"phone"`
+	VCardData    string    `json:"vcard_data"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // DeliveryLog tracks the delivery status of an outbound message.

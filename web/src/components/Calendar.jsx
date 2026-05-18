@@ -11,6 +11,7 @@ export default function CalendarView() {
   const [showForm, setShowForm] = useState(false)
   const [editingEvent, setEditingEvent] = useState(null)
   const [form, setForm] = useState({ title: '', start: '', end: '', description: '', location: '' })
+  const [formError, setFormError] = useState('')
 
   const fetchEvents = async () => {
     setLoading(true)
@@ -44,22 +45,23 @@ export default function CalendarView() {
 
   const getEventsForDay = (date) => {
     return events.filter((e) => {
-      const eventDate = new Date(e.start_time || e.start)
+      const eventDate = new Date(e.start)
       return isSameDay(eventDate, date)
     })
   }
 
   const handleSave = async () => {
+    setFormError('')
     try {
       const payload = {
         title: form.title,
         description: form.description,
         location: form.location,
-        start_time: new Date(form.start).toISOString(),
-        end_time: new Date(form.end).toISOString(),
+        start: new Date(form.start).toISOString(),
+        end: new Date(form.end).toISOString(),
       }
       if (editingEvent) {
-        await updateCalendarEvent(editingEvent.id, payload)
+        await updateCalendarEvent(editingEvent.uid, payload)
       } else {
         await createCalendarEvent(payload)
       }
@@ -68,17 +70,19 @@ export default function CalendarView() {
       setForm({ title: '', start: '', end: '', description: '', location: '' })
       fetchEvents()
     } catch (err) {
-      alert('Failed to save event')
+      setFormError(err.response?.data?.error?.message || 'Failed to save event')
     }
   }
 
-  const handleDelete = async (id) => {
+  const handleDelete = async (uid) => {
     if (!confirm('Delete this event?')) return
     try {
-      await deleteCalendarEvent(id)
+      await deleteCalendarEvent(uid)
+      setShowForm(false)
+      setEditingEvent(null)
       fetchEvents()
     } catch (err) {
-      alert('Failed to delete event')
+      console.error('Delete failed:', err)
     }
   }
 
@@ -153,8 +157,8 @@ export default function CalendarView() {
                       key={e.id}
                       onClick={(ev) => { ev.stopPropagation(); setEditingEvent(e); setForm({
                         title: e.title || '',
-                        start: format(new Date(e.start_time || e.start), "yyyy-MM-dd'T'HH:mm"),
-                        end: format(new Date(e.end_time || e.end), "yyyy-MM-dd'T'HH:mm"),
+                        start: format(new Date(e.start), "yyyy-MM-dd'T'HH:mm"),
+                        end: format(new Date(e.end), "yyyy-MM-dd'T'HH:mm"),
                         description: e.description || '',
                         location: e.location || '',
                       }); setShowForm(true); }}
@@ -184,6 +188,7 @@ export default function CalendarView() {
               </button>
             </div>
             <div className="space-y-3">
+              {formError && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>}
               <input placeholder="Title" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="input-field" />
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -199,7 +204,7 @@ export default function CalendarView() {
               <textarea placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="input-field min-h-[80px]" />
               <div className="flex justify-end gap-2">
                 {editingEvent && (
-                  <button onClick={() => handleDelete(editingEvent.id)} className="btn-secondary text-red-600 border-red-200 hover:bg-red-50 mr-auto">Delete</button>
+                  <button onClick={() => handleDelete(editingEvent.uid)} className="btn-secondary text-red-600 border-red-200 hover:bg-red-50 mr-auto">Delete</button>
                 )}
                 <button onClick={() => setShowForm(false)} className="btn-secondary">Cancel</button>
                 <button onClick={handleSave} className="btn-primary">Save</button>

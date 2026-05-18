@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate, useParams, useLocation } from 'react-router-dom'
 import { Send, X, Paperclip, Trash2 } from 'lucide-react'
 import {
-  createDraft, updateDraft, sendDraft, parseRecipients, getMessage,
+  createDraft, updateDraft, sendDraft, parseRecipients, getMessage, deleteMessage,
   listDraftAttachments, uploadDraftAttachment, deleteDraftAttachment,
 } from '../api'
 import RichEditor, { htmlToText } from './RichEditor'
@@ -12,35 +12,57 @@ export default function Compose() {
   const { draftId: routeDraftId } = useParams()
   const location = useLocation()
   const replyTo = location.state?.replyTo
+  const forwardTo = location.state?.forwardTo
 
   const [draftId, setDraftId] = useState(routeDraftId || null)
   const [to, setTo] = useState(replyTo ? replyTo.from?.email || '' : '')
   const [cc, setCc] = useState('')
   const [bcc, setBcc] = useState('')
-  const [subject, setSubject] = useState(replyTo ? `Re: ${replyTo.subject || ''}` : '')
+  const [subject, setSubject] = useState(
+    replyTo ? `Re: ${replyTo.subject || ''}` :
+    forwardTo ? `Fwd: ${forwardTo.subject || ''}` : ''
+  )
   const [html, setHtml] = useState('')
   const [attachments, setAttachments] = useState([])
   const [sending, setSending] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
   const [error, setError] = useState('')
   const fileRef = useRef(null)
+  const loadedDraftId = useRef(null)
 
   useEffect(() => {
     if (replyTo) {
-      const quoted = replyTo.html_body || replyTo.plain_text || replyTo.snippet || ''
+      let quoted = replyTo.html_body
+      if (!quoted && replyTo.plain_text) {
+        quoted = replyTo.plain_text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>')
+      }
+      if (!quoted) quoted = replyTo.snippet || ''
       setHtml(`<p></p><blockquote>On ${new Date(replyTo.date).toLocaleString()}, ${replyTo.from?.name || replyTo.from?.email} wrote:<br/>${quoted}</blockquote>`)
     }
-  }, [replyTo])
+    if (forwardTo) {
+      let body = forwardTo.html_body
+      if (!body && forwardTo.plain_text) {
+        body = forwardTo.plain_text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>')
+      }
+      if (!body) body = forwardTo.snippet || ''
+      setHtml(`<p></p><div><br/>---------- Forwarded message ----------<br/>From: ${forwardTo.from?.name || forwardTo.from?.email || ''} &lt;${forwardTo.from?.email || ''}&gt;<br/>Date: ${new Date(forwardTo.date).toLocaleString()}<br/>Subject: ${forwardTo.subject || ''}<br/><br/>${body}</div>`)
+    }
+  }, [replyTo, forwardTo])
 
+  // Load existing draft only when opening via URL (/compose/:draftId).
+  // Do NOT reload when draftId state changes from ensureDraft/autosave.
   useEffect(() => {
-    if (draftId && !replyTo) {
-      getMessage(draftId).then((msg) => {
-        setTo((msg.to || []).map((t) => t.name ? `${t.name} <${t.address}>` : t.address).join(', '))
+    if (routeDraftId && !replyTo && !forwardTo && loadedDraftId.current !== routeDraftId) {
+      getMessage(routeDraftId).then((msg) => {
+        setTo((msg.to || []).map((t) => t.name ? `${t.name} <${t.email}>` : t.email).join(', '))
+        setCc((msg.cc || []).map((t) => t.name ? `${t.name} <${t.email}>` : t.email).join(', '))
+        setBcc((msg.bcc || []).map((t) => t.name ? `${t.name} <${t.email}>` : t.email).join(', '))
         setSubject(msg.subject || '')
         setHtml(msg.html_body || '')
-      }).catch(() => {})
+        loadedDraftId.current = routeDraftId
+      }).catch((err) => console.error('Draft fetch failed:', err))
     }
-  }, [draftId, replyTo])
+  }, [routeDraftId, replyTo, forwardTo])
 
   useEffect(() => {
     if (draftId) listDraftAttachments(draftId).then(setAttachments).catch(() => {})
@@ -77,6 +99,10 @@ export default function Compose() {
   }, [to, cc, bcc, subject, html, persist])
 
   const handleSend = async () => {
+    if (!htmlToText(html).trim()) {
+      setError('Please add a message body before sending.')
+      return
+    }
     setSending(true)
     setError('')
     try {
@@ -95,6 +121,17 @@ export default function Compose() {
     } finally {
       setSending(false)
     }
+  }
+
+  const handleDiscard = async () => {
+    if (draftId) {
+      try {
+        await deleteMessage(draftId)
+      } catch (e) {
+        // ignore; draft may not exist
+      }
+    }
+    navigate(-1)
   }
 
   const ensureDraft = async () => {
@@ -141,6 +178,11 @@ export default function Compose() {
         </button>
         <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => handleFiles(Array.from(e.target.files))} />
         <div className="flex-1" />
+        {draftId && (
+          <button onClick={handleDiscard} className="text-sm text-surface-500 hover:text-red-600 px-2">
+            Discard
+          </button>
+        )}
         {savedAt && <span className="text-xs text-surface-400">Saved {savedAt.toLocaleTimeString()}</span>}
       </div>
 

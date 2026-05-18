@@ -87,6 +87,9 @@ func constantTimeCompare(a, b []byte) bool {
 	return v == 0
 }
 
+// ErrInvalidCredentials indicates wrong email or password.
+var ErrInvalidCredentials = fmt.Errorf("invalid credentials")
+
 // Authenticate validates email and password.
 func (s *Service) Authenticate(ctx context.Context, email, password string) (*models.User, error) {
 	row := s.pool.QueryRow(ctx, `SELECT id, email, password_hash, display_name, timezone, locale, is_super_admin, created_at, updated_at, settings FROM users WHERE email=$1`, email)
@@ -94,12 +97,12 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (*mo
 	var settings []byte
 	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Timezone, &u.Locale, &u.IsSuperAdmin, &u.CreatedAt, &u.UpdatedAt, &settings); err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("invalid credentials")
+			return nil, ErrInvalidCredentials
 		}
 		return nil, err
 	}
 	if !s.verifyPassword(password, u.PasswordHash) {
-		return nil, fmt.Errorf("invalid credentials")
+		return nil, ErrInvalidCredentials
 	}
 	return &u, nil
 }
@@ -279,7 +282,7 @@ func (s *Service) AdminResetPassword(ctx context.Context, userID uuid.UUID, newP
 
 // GetUserDomains returns domain memberships for a user.
 func (s *Service) GetUserDomains(ctx context.Context, userID uuid.UUID) ([]*models.DomainMember, error) {
-	rows, err := s.pool.Query(ctx, `SELECT domain_id, user_id, role, created_at FROM domain_members WHERE user_id=$1`, userID)
+	rows, err := s.pool.Query(ctx, `SELECT domain_id, user_id, role, created_at FROM domain_members WHERE user_id=$1 ORDER BY created_at ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +352,42 @@ func (s *Service) GetDomainByName(ctx context.Context, name string) (*models.Dom
 		return nil, err
 	}
 	return &d, nil
+}
+
+// ListDomains returns all domains in the system.
+func (s *Service) ListDomains(ctx context.Context) ([]*models.Domain, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, COALESCE(postmark_token,''), COALESCE(postmark_stream,''), created_at, updated_at, settings
+		FROM domains ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.Domain
+	for rows.Next() {
+		var d models.Domain
+		var settings []byte
+		if err := rows.Scan(&d.ID, &d.Name, &d.PostmarkToken, &d.PostmarkStream, &d.CreatedAt, &d.UpdatedAt, &settings); err != nil {
+			return nil, err
+		}
+		out = append(out, &d)
+	}
+	return out, rows.Err()
+}
+
+// CountUsers returns the total number of users.
+func (s *Service) CountUsers(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// CountDomains returns the total number of domains.
+func (s *Service) CountDomains(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM domains`).Scan(&n)
+	return n, err
 }
 
 // GetUserByEmail fetches a user by their email address.

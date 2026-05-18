@@ -39,7 +39,7 @@ func NewRouter(cfg Config) *gin.Engine {
 	// Proxy backend API routes
 	apiRoutes := []string{
 		"/api/*path",
-		"/admin/*path",
+		"/admin/api/*path",
 		"/webhooks/*path",
 		"/auth/*path",
 		"/healthz",
@@ -54,7 +54,7 @@ func NewRouter(cfg Config) *gin.Engine {
 	r.NoRoute(func(c *gin.Context) {
 		// Don't interfere with API routes
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") ||
-			strings.HasPrefix(c.Request.URL.Path, "/admin/") ||
+			strings.HasPrefix(c.Request.URL.Path, "/admin/api/") ||
 			strings.HasPrefix(c.Request.URL.Path, "/auth/") ||
 			strings.HasPrefix(c.Request.URL.Path, "/webhooks/") ||
 			strings.HasPrefix(c.Request.URL.Path, "/events") ||

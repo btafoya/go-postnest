@@ -9,11 +9,12 @@ export default function Contacts() {
   const [editing, setEditing] = useState(null)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ name: '', email: '', phone: '', notes: '' })
+  const [formError, setFormError] = useState('')
 
   const fetchContacts = () => {
     setLoading(true)
     getContacts()
-      .then((data) => setContacts(data))
+      .then((data) => setContacts(data.map((c) => ({ ...c, notes: c.vcard_data || '' }))))
       .catch(console.error)
       .finally(() => setLoading(false))
   }
@@ -28,6 +29,7 @@ export default function Contacts() {
   )
 
   const handleSave = async () => {
+    setFormError('')
     try {
       if (editing) {
         await updateContact(editing.id, form)
@@ -39,7 +41,7 @@ export default function Contacts() {
       setForm({ name: '', email: '', phone: '', notes: '' })
       fetchContacts()
     } catch (err) {
-      alert('Failed to save contact')
+      setFormError(err.response?.data?.error?.message || 'Failed to save contact')
     }
   }
 
@@ -60,7 +62,7 @@ export default function Contacts() {
       await deleteContact(id)
       fetchContacts()
     } catch (err) {
-      alert('Failed to delete contact')
+      console.error('Delete failed:', err)
     }
   }
 
@@ -142,6 +144,7 @@ export default function Contacts() {
               </button>
             </div>
             <div className="space-y-3">
+              {formError && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>}
               <input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="input-field" />
               <input placeholder="Email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="input-field" />
               <input placeholder="Phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="input-field" />

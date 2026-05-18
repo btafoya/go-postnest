@@ -152,8 +152,14 @@ func (s *PGStore) PutEvent(ctx context.Context, ev *models.CalendarEvent) error 
 }
 
 func (s *PGStore) DeleteEvent(ctx context.Context, calID uuid.UUID, uid string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM calendar_events WHERE calendar_id=$1 AND uid=$2`, calID, uid)
-	return err
+	ct, err := s.pool.Exec(ctx, `DELETE FROM calendar_events WHERE calendar_id=$1 AND uid=$2`, calID, uid)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PGStore) BumpCTag(ctx context.Context, calID uuid.UUID) error {

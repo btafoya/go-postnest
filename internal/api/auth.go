@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"time"
@@ -54,7 +55,11 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.Auth.Authenticate(r.Context(), req.Email, req.Password)
 	if err != nil {
-		WriteError(w, ErrUnauthorized)
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			WriteError(w, ErrInvalidCredentials)
+		} else {
+			WriteError(w, ErrUnauthorized)
+		}
 		return
 	}
 

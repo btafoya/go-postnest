@@ -149,7 +149,7 @@ export async function searchMessages(q, params = {}) {
 }
 
 export async function getDomains() {
-  const res = await api.get('/admin/domains')
+  const res = await api.get('/admin/api/v1/domains', { baseURL: '' })
   return res.data.domains || []
 }
 

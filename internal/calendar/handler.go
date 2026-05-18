@@ -3,6 +3,7 @@ package calendar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -185,7 +186,11 @@ func (h *Handler) updateEvent(w http.ResponseWriter, r *http.Request) {
 	uidParam := chi.URLParam(r, "id")
 	existing, err := h.store.GetEvent(r.Context(), cal.ID, uidParam)
 	if err != nil {
-		api.WriteError(w, err)
+		if errors.Is(err, ErrNotFound) {
+			api.WriteError(w, api.ErrNotFound)
+		} else {
+			api.WriteError(w, err)
+		}
 		return
 	}
 	ev, err := decodeEvent(r)
@@ -220,7 +225,11 @@ func (h *Handler) deleteEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.DeleteEvent(r.Context(), cal.ID, chi.URLParam(r, "id")); err != nil {
-		api.WriteError(w, err)
+		if errors.Is(err, ErrNotFound) {
+			api.WriteError(w, api.ErrNotFound)
+		} else {
+			api.WriteError(w, err)
+		}
 		return
 	}
 	_ = h.store.BumpCTag(r.Context(), cal.ID)

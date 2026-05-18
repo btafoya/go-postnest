@@ -93,4 +93,6 @@ type Store interface {
 	CountsByLabel(ctx context.Context, domainID, userID uuid.UUID) (map[uuid.UUID]LabelCounts, error)
 
 	CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error
+
+	CountMessagesToday(ctx context.Context) (int64, error)
 }

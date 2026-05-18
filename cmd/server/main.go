@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
 	"github.com/go-postnest/postnest/internal/calendar"
@@ -109,6 +110,7 @@ func main() {
 		r.Use(api.CSRF)
 		webmailHandler.RegisterRoutes(r)
 		calendar.NewHandler(calendarStore, authService).RegisterRoutes(r)
+		contacts.NewHandler(contactsStore, authService).RegisterRoutes(r)
 	})
 
 	// Admin API routes
@@ -117,13 +119,32 @@ func main() {
 		r.Use(api.CSRF)
 		r.Use(api.RequireDomainAdmin(authService))
 		r.Get("/admin/api/v1/domains", func(w http.ResponseWriter, r *http.Request) {
-			user := api.UserFromContext(r.Context())
-			doms, err := authService.GetUserDomains(r.Context(), user.ID)
+			ctx := r.Context()
+			doms, err := authService.ListDomains(ctx)
 			if err != nil {
 				api.WriteError(w, api.ErrInternal)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"domains": doms})
+			type dto struct {
+				ID        uuid.UUID `json:"id"`
+				Name      string    `json:"name"`
+				Status    string    `json:"status"`
+				UserCount int64     `json:"user_count"`
+				CreatedAt time.Time `json:"created_at"`
+			}
+			out := make([]dto, 0, len(doms))
+			for _, d := range doms {
+				var uc int64
+				_ = pgPool.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM domain_members WHERE domain_id=$1`, d.ID).Scan(&uc)
+				out = append(out, dto{
+					ID:        d.ID,
+					Name:      d.Name,
+					Status:    "Active",
+					UserCount: uc,
+					CreatedAt: d.CreatedAt,
+				})
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"domains": out})
 		})
 		r.Get("/admin/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
@@ -145,12 +166,18 @@ func main() {
 			}
 			depth, _ := redisClient.UniversalClient.LLen(ctx, "queue:jobs").Result()
 			dead, _ := redisClient.UniversalClient.LLen(ctx, "queue:jobs:dead").Result()
+			activeUsers, _ := authService.CountUsers(ctx)
+			msgToday, _ := mailStore.CountMessagesToday(ctx)
+			totalDomains, _ := authService.CountDomains(ctx)
 			writeJSON(w, http.StatusOK, map[string]any{
-				"database":     comp(func() error { return pgPool.Ping(ctx) }),
-				"redis":        comp(func() error { return redisClient.Ping(ctx).Err() }),
-				"imap":         comp(dialTCP(imapAddr)),
-				"smtp":         comp(dialTCP(smtpAddr)),
-				"worker_queue": map[string]any{"depth": depth, "dead": dead},
+				"database":      comp(func() error { return pgPool.Ping(ctx) }),
+				"redis":         comp(func() error { return redisClient.Ping(ctx).Err() }),
+				"imap":          comp(dialTCP(imapAddr)),
+				"smtp":          comp(dialTCP(smtpAddr)),
+				"worker_queue":  map[string]any{"depth": depth, "dead": dead},
+				"active_users":  activeUsers,
+				"messages_today": msgToday,
+				"total_domains": totalDomains,
 			})
 		})
 	})

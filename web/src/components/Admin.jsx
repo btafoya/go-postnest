@@ -68,15 +68,15 @@ export default function Admin() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="card p-4">
                 <p className="text-sm text-surface-500">Total Domains</p>
-                <p className="text-2xl font-semibold text-surface-900">{domains.length}</p>
+                <p className="text-2xl font-semibold text-surface-900">{health?.total_domains ?? '—'}</p>
               </div>
               <div className="card p-4">
                 <p className="text-sm text-surface-500">Active Users</p>
-                <p className="text-2xl font-semibold text-surface-900">—</p>
+                <p className="text-2xl font-semibold text-surface-900">{health?.active_users ?? '—'}</p>
               </div>
               <div className="card p-4">
                 <p className="text-sm text-surface-500">Messages Today</p>
-                <p className="text-2xl font-semibold text-surface-900">—</p>
+                <p className="text-2xl font-semibold text-surface-900">{health?.messages_today ?? '—'}</p>
               </div>
             </div>
 
@@ -144,7 +144,7 @@ export default function Admin() {
                       <td className="px-4 py-2">
                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">Active</span>
                       </td>
-                      <td className="px-4 py-2 text-surface-600">—</td>
+                      <td className="px-4 py-2 text-surface-600">{domain.user_count ?? '—'}</td>
                       <td className="px-4 py-2 text-surface-500">{domain.created_at ? new Date(domain.created_at).toLocaleDateString() : '—'}</td>
                     </tr>
                   ))}

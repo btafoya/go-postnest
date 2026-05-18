@@ -27,13 +27,14 @@ func (e *AppError) Error() string { return e.Message }
 
 // Common errors.
 var (
-	ErrNotFound     = &AppError{Code: "not_found", Message: "Resource not found", StatusCode: http.StatusNotFound}
-	ErrUnauthorized = &AppError{Code: "unauthorized", Message: "Authentication required", StatusCode: http.StatusUnauthorized}
-	ErrForbidden    = &AppError{Code: "forbidden", Message: "Access denied", StatusCode: http.StatusForbidden}
-	ErrValidation   = &AppError{Code: "validation_failed", Message: "Request validation failed", StatusCode: http.StatusBadRequest}
-	ErrConflict     = &AppError{Code: "conflict", Message: "Resource conflict", StatusCode: http.StatusConflict}
-	ErrRateLimited  = &AppError{Code: "rate_limited", Message: "Too many requests", StatusCode: http.StatusTooManyRequests}
-	ErrInternal     = &AppError{Code: "internal_error", Message: "Internal server error", StatusCode: http.StatusInternalServerError}
+	ErrNotFound          = &AppError{Code: "not_found", Message: "Resource not found", StatusCode: http.StatusNotFound}
+	ErrUnauthorized      = &AppError{Code: "unauthorized", Message: "Authentication required", StatusCode: http.StatusUnauthorized}
+	ErrInvalidCredentials = &AppError{Code: "invalid_credentials", Message: "Invalid credentials", StatusCode: http.StatusUnauthorized}
+	ErrForbidden         = &AppError{Code: "forbidden", Message: "Access denied", StatusCode: http.StatusForbidden}
+	ErrValidation        = &AppError{Code: "validation_failed", Message: "Request validation failed", StatusCode: http.StatusBadRequest}
+	ErrConflict          = &AppError{Code: "conflict", Message: "Resource conflict", StatusCode: http.StatusConflict}
+	ErrRateLimited       = &AppError{Code: "rate_limited", Message: "Too many requests", StatusCode: http.StatusTooManyRequests}
+	ErrInternal          = &AppError{Code: "internal_error", Message: "Internal server error", StatusCode: http.StatusInternalServerError}
 )
 
 // NewValidationError creates a validation error with field details.

@@ -63,7 +63,7 @@ export default function MessageView() {
         <button onClick={() => navigate('/compose', { state: { replyTo: message } })} className="p-2 hover:bg-surface-100 rounded-md" title="Reply">
           <Reply className="h-4 w-4" />
         </button>
-        <button className="p-2 hover:bg-surface-100 rounded-md" title="Forward">
+        <button onClick={() => navigate('/compose', { state: { forwardTo: message } })} className="p-2 hover:bg-surface-100 rounded-md" title="Forward">
           <Forward className="h-4 w-4" />
         </button>
         <div className="flex-1"></div>

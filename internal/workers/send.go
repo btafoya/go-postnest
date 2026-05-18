@@ -74,6 +74,19 @@ func (p *SendProcessor) Process(ctx context.Context, job *Job) error {
 		MessageStream: domain.PostmarkStream,
 	}
 
+	atts, err := p.store.ListMessageAttachments(ctx, draftID)
+	if err != nil {
+		p.logger.Error("failed to list attachments", "error", err)
+	} else {
+		for _, a := range atts {
+			pmMsg.Attachments = append(pmMsg.Attachments, postmark.Attachment{
+				Name:        a.Filename,
+				ContentType: a.ContentType,
+				Content:     a.Data,
+			})
+		}
+	}
+
 	res, err := p.postmark.SendEmail(ctx, domain.PostmarkToken, pmMsg)
 	if err != nil {
 		return fmt.Errorf("postmark send: %w", err)

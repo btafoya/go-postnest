@@ -29,4 +29,13 @@
   .sidebar-item.active {
     @apply bg-primary-50 text-primary-700 font-semibold;
   }
+
+  .ProseMirror blockquote {
+    border-left: 3px solid #dadce0;
+    padding-left: 1rem;
+    margin-left: 0;
+    margin-right: 0;
+    font-style: italic;
+    color: #5f6368;
+  }
 }

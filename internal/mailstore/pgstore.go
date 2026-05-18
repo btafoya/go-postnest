@@ -207,7 +207,7 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 }
 
 func (s *PGStore) UpdateMessage(ctx context.Context, domainID, userID, messageID uuid.UUID, patch MessagePatch) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE messages SET
 			is_read = coalesce($4, is_read),
 			is_flagged = coalesce($5, is_flagged),
@@ -224,7 +224,13 @@ func (s *PGStore) UpdateMessage(ctx context.Context, domainID, userID, messageID
 			updated_at = now()
 		WHERE id=$1 AND domain_id=$2 AND user_id=$3
 	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox, patch.IsOutbound, patch.Subject, patch.HTMLBody, patch.PlainText, patch.ToAddresses, patch.CcAddresses, patch.BccAddresses)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PGStore) DeleteMessage(ctx context.Context, domainID, userID, messageID uuid.UUID) error {
@@ -671,6 +677,14 @@ func (s *PGStore) CountsByLabel(ctx context.Context, domainID, userID uuid.UUID)
 		out[id] = c
 	}
 	return out, rows.Err()
+}
+
+func (s *PGStore) CountMessagesToday(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM messages WHERE created_at >= CURRENT_DATE
+	`).Scan(&count)
+	return count, err
 }
 
 func (s *PGStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error {
