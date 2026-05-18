@@ -2,67 +2,90 @@
 
 **Analysis Date:** 2026-05-18
 
-## Go Test Framework
+## Test Framework
 
-**Runner:** Go standard `testing` package (Go 1.25)
-- No external assertion library ( testify, ginkgo, etc. not used )
-- Config: none needed; `go test ./...` from Makefile
+**Go:**
+- Runner: Standard `testing` package (Go 1.25)
+- No external assertion libraries (no testify, no ginkgo)
+- Run command: `go test ./...` (via `Makefile`)
 
-**Run Commands:**
+**Frontend:**
+- Runner: Vitest 4.1.6 (configured inside `vite.config.js`)
+- Assertion: Vitest `expect` + `@testing-library/jest-dom` matchers
+- Config: `web/vite.config.js`
+- Run commands:
 ```bash
-make test              # Run all Go tests
-go test ./...          # Direct invocation
-go test -v ./internal/auth   # Verbose single package
+cd web && npm test              # Run all tests (vitest run)
+cd web && npm run test:cov      # Run with coverage (vitest run --coverage)
 ```
 
-## Go Test File Organization
+## Test File Organization
 
-**Location:** Co-located in same package as source code
-- `internal/auth/auth_test.go` tests `internal/auth/auth.go`
-- `internal/calendar/ical_test.go` tests `internal/calendar/ical.go`
+**Go:**
+- Location: Co-located with source in same package
+- Naming: `*_test.go` (e.g., `auth_test.go`, `webmail_test.go`)
+- Package declaration: same package name as source (e.g., `package auth`)
 
-**Naming:** `Test[Function]_[Scenario]`
-- `TestHashAndVerifyPassword`
-- `TestLoginServer_InvalidCredentials`
-- `TestDedup_TTLEviction`
+**Frontend:**
+- Location: `web/src/test/` (separate test directory)
+- Naming: `[name].test.js` or `[name].test.jsx`
+- Files:
+  - `web/src/test/setup.js` — test setup
+  - `web/src/test/api.test.js` — API utility tests
+  - `web/src/test/messageview.test.jsx` — React component tests
+  - `web/src/test/richeditor.test.js` — Editor utility tests
 
-## Go Test Structure
+## Test Structure
 
-**Standard Pattern:**
+**Go Suite Organization:**
 ```go
-func TestCreateDraft(t *testing.T) {
-    h, store := newTestHandler()
+func TestHashAndVerifyPassword(t *testing.T) {
+    s := NewService(nil, 1, 64*1024, 4, "test-session-key")
 
-    reqBody, _ := json.Marshal(map[string]any{
-        "subject": "Hello",
-        "to": []map[string]string{{"address": "bob@example.com"}},
-    })
-    req := httptest.NewRequest(http.MethodPost, "/api/v1/drafts", bytes.NewReader(reqBody))
-    req = req.WithContext(api.WithUser(req.Context(), &models.User{...}))
-    rr := httptest.NewRecorder()
-
-    h.createDraft(rr, req)
-
-    if rr.Code != http.StatusCreated {
-        t.Errorf("status = %d, want %d", rr.Code, http.StatusCreated)
+    hash, err := s.hashPassword("correct-horse-battery-staple")
+    if err != nil {
+        t.Fatalf("hashPassword failed: %v", err)
     }
-    if len(store.messages) != 1 {
-        t.Fatalf("expected 1 message, got %d", len(store.messages))
+    if hash == "" {
+        t.Fatal("hashPassword returned empty string")
+    }
+
+    if !s.verifyPassword("correct-horse-battery-staple", hash) {
+        t.Error("verifyPassword should succeed for correct password")
     }
 }
 ```
 
-**Assertion Style:**
-- Setup failures: `t.Fatalf("setup: %v", err)`
-- Value mismatches: `t.Errorf("field = %q, want %q", got, want)`
-- Boolean checks: `t.Error("expected condition")` / `t.Fatal("unexpected condition")`
-- No table-driven tests observed; each scenario is a separate test function
+**Patterns:**
+- Use `t.Fatalf` for setup failures that prevent test continuation
+- Use `t.Errorf` / `t.Error` for assertion failures that allow remaining checks
+- No table-driven tests observed in current test suite
 
-## Go Mocking
+**Frontend Suite Organization:**
+```javascript
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-**Framework:** Hand-rolled interface implementations
+describe('MessageView', () => {
+  beforeEach(() => vi.clearAllMocks())
 
-**Pattern:**
+  it('renders html_body in a sandboxed iframe', async () => {
+    getMessage.mockResolvedValue({ ... })
+    const { container } = renderAt('1')
+    await waitFor(() => {
+      const iframe = container.querySelector('iframe[title="message-body"]')
+      expect(iframe).toBeTruthy()
+    })
+  })
+})
+```
+
+## Mocking
+
+**Go:**
+- Framework: None (hand-rolled structs implementing interfaces)
+- Pattern: define a `mock{type}` struct that satisfies the interface under test
+
+Example from `internal/webmail/webmail_test.go`:
 ```go
 type mockStore struct {
     messages []*models.Message
@@ -73,194 +96,132 @@ func (m *mockStore) CreateMessage(ctx context.Context, msg *models.Message, labe
     m.messages = append(m.messages, msg)
     return nil
 }
+// ... remaining interface methods
 ```
 
-**Common Mock Types:**
-- `mockStore` - implements `mailstore.Store` interface for handler tests (`internal/webmail/webmail_test.go`)
-- `mockAuth` - implements `DomainLister` / auth interface (`internal/webmail/webmail_test.go`)
-- `testProcessor` - implements `workers.Processor` for worker tests (`internal/workers/workers_test.go`)
+- In-memory state tracking on the mock struct itself
+- Mock functions embedded directly in test file
+
+**Frontend:**
+- Framework: Vitest `vi.mock()`
+- Pattern: mock the API module at import time
+
+Example from `web/src/test/messageview.test.jsx`:
+```javascript
+vi.mock('../api', () => ({
+  getMessage: vi.fn(),
+  patchMessage: vi.fn().mockResolvedValue({}),
+  deleteMessage: vi.fn(),
+}))
+```
+
+- Clear mocks in `beforeEach`
+- `mockResolvedValue` / `mockRejectedValue` for async functions
 
 **What to Mock:**
-- Database stores (via interface implementations)
-- Authentication services
-- External API clients (postmark)
-- Redis (via `miniredis` in-memory server)
+- External services (Redis via `miniredis`)
+- Database layer (via `mockStore` implementing `mailstore.Store`)
+- API calls in frontend (via `vi.mock`)
 
 **What NOT to Mock:**
-- Standard library utilities (UUID generation, JSON encoding)
-- HTTP request/response objects (use `httptest` directly)
+- Standard library functions (use real `httptest`, real `time.Now`)
+- No evidence of mocking `pgx` directly (SQL tests appear absent)
 
-## Go Test Fixtures and Setup
+## Fixtures and Factories
 
-**Setup Helpers:**
+**Go:**
+- No dedicated fixture files
+- Setup helpers return configured objects:
+  ```go
+  func setupTestPool(t *testing.T) (*Pool, *miniredis.Miniredis, *time.Time) { ... }
+  func newTestHandler() (*Handler, *mockStore) { ... }
+  ```
+- Inline test data creation (e.g., `t.TempDir()`, `os.WriteFile`)
+
+**Frontend:**
+- Inline mock data in test cases (e.g., `getMessage.mockResolvedValue({ id: '1', subject: 'Hi' })`)
+- No factory functions observed
+
+## Coverage
+
+**Frontend:**
+- Provider: `@vitest/coverage-v8`
+- Reporters: `text`, `json-summary`
+- View: `cd web && npm run test:cov`
+
+**Go:**
+- No enforced coverage target detected
+- Standard: `go test -cover ./...`
+
+## Test Types
+
+**Unit Tests:**
+- Go: handler logic, domain logic, utility functions (e.g., `TestToMessageDTO`, `TestSnippetTruncates`)
+- Frontend: pure utility functions (`parseRecipients`, `htmlToText`), component rendering
+
+**Integration Tests:**
+- Limited scope; mostly unit tests with mocked dependencies
+- Redis tests use `miniredis` (in-memory Redis)
+
+**E2E Tests:**
+- Not used
+
+## Common Patterns
+
+**Go Async/HTTP Testing:**
 ```go
-func setupTestRedis(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
+req := httptest.NewRequest(http.MethodPost, "/api/v1/drafts", bytes.NewReader(reqBody))
+req = req.WithContext(api.WithUser(req.Context(), &models.User{...}))
+rr := httptest.NewRecorder()
+h.createDraft(rr, req)
+
+if rr.Code != http.StatusCreated {
+    t.Errorf("status = %d, want %d", rr.Code, http.StatusCreated)
+}
+```
+
+**Go Context Injection:**
+- Tests inject user/domain into context via helper functions:
+  ```go
+  func WithUser(ctx context.Context, user *models.User) context.Context
+  ```
+
+**Go Redis Testing:**
+```go
+func setupTestRedis(t *testing.T) (*Client, *miniredis.Miniredis) {
     m := miniredis.RunT(t)
-    c, err := redis.New("redis://" + m.Addr())
+    c, err := New("redis://" + m.Addr())
     if err != nil {
         t.Fatalf("new redis client: %v", err)
     }
     return c, m
 }
+```
 
-func newTestHandler() (*Handler, *mockStore) {
-    store := &mockStore{}
-    return NewHandler(store, &mockAuth{}, nil, 25<<20), store
+**Frontend Component Testing:**
+```javascript
+function renderAt(id) {
+  return render(
+    <MemoryRouter initialEntries={[`/message/${id}`]}>
+      <Routes>
+        <Route path="/message/:id" element={<MessageView />} />
+      </Routes>
+    </MemoryRouter>
+  )
 }
 ```
 
-**Time Control:**
-- Injectable clock functions for deterministic timing
-  ```go
-  p.nowFunc = func() time.Time { return now }
-  ```
-- `miniredis.FastForward(duration)` for TTL testing
-
-**Temp Files:**
-```go
-dir := t.TempDir()
-path := filepath.Join(dir, "postnest.conf")
-```
-
-**Environment Variables:**
-```go
-t.Setenv("POSTNEST_DATABASE_DSN", "postgres://env@localhost/env")
-```
-
-## Go Coverage
-
-**Requirements:** None enforced
-
-**View Coverage:**
-```bash
-go test -cover ./...
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-```
-
-## Go Test Types
-
-**Unit Tests:**
-- Pure logic tests: `internal/calendar/ical_test.go` (round-trip ICS encoding)
-- Password hashing: `internal/auth/auth_test.go`
-- DTO conversion: `internal/webmail/dto_test.go`
-
-**Integration Tests (with in-memory dependencies):**
-- Redis-backed deduplication: `internal/webhook/webhook_test.go` (uses `miniredis`)
-- Worker pool retry/dead-letter: `internal/workers/workers_test.go` (uses `miniredis`)
-- Config loader: `internal/config/loader_test.go` (uses temp files + env vars)
-
-**HTTP Handler Tests:**
-- Middleware: `internal/api/middleware_test.go` (CORS, rate limiter, recovery, cookies)
-- CSRF: `internal/api/csrf_test.go`
-- Error handling: `internal/api/errors_test.go`
-- Webmail handlers: `internal/webmail/webmail_test.go` (uses `httptest.NewRecorder`)
-- SMTP session: `internal/smtp/smtp_test.go`
-
-## Web Test Framework
-
-**Runner:** Vitest 4.1.6
-- Config: `web/vite.config.js`
-- Environment: `jsdom`
-- Globals enabled (`describe`, `it`, `expect` available without import in test files)
-
-**Assertion Library:**
-- Vitest built-in `expect`
-- `@testing-library/jest-dom` for DOM matchers (`toBeInTheDocument`, `toBeTruthy`)
-
-**Run Commands:**
-```bash
-cd web && npm test              # Run all tests
-cd web && npm run test:cov     # Coverage with v8 provider
-```
-
-## Web Test File Organization
-
-**Location:** `web/src/test/`
-- `setup.js` - test bootstrap
-- Component tests: `messageview.test.jsx`
-- Utility tests: `api.test.js`, `richeditor.test.js`
-
-**Naming:** `[subject].test.[ext]`
-
-## Web Test Structure
-
-**Pattern:**
+**Frontend Async Testing:**
 ```javascript
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
-
-describe('MessageView', () => {
-  beforeEach(() => vi.clearAllMocks())
-
-  it('renders html_body in a sandboxed iframe', async () => {
-    getMessage.mockResolvedValue({ id: '1', subject: 'Hi', html_body: '<p>Rich</p>' })
-    const { container } = renderAt('1')
-    await waitFor(() => {
-      const iframe = container.querySelector('iframe[title="message-body"]')
-      expect(iframe).toBeTruthy()
-    })
-  })
+await waitFor(() => {
+  const iframe = container.querySelector('iframe[title="message-body"]')
+  expect(iframe).toBeTruthy()
 })
 ```
 
-## Web Mocking
-
-**Framework:** Vitest `vi` namespace
-
-**Pattern:**
-```javascript
-vi.mock('../api', () => ({
-  getMessage: vi.fn(),
-  patchMessage: vi.fn().mockResolvedValue({}),
-}))
-```
-
-**MSW:** Installed (`msw` in devDependencies) but not used in existing tests
-
-**What to Mock:**
-- API module imports (`../api`)
-- React Router context via `MemoryRouter`
-
-## Web Fixtures
-
-**No dedicated fixture files.**
-- Inline mock data in test files
-- Component rendering helper functions:
-  ```javascript
-  function renderAt(id) {
-    return render(
-      <MemoryRouter initialEntries={[`/message/${id}`]}>
-        <Routes>
-          <Route path="/message/:id" element={<MessageView />} />
-        </Routes>
-      </MemoryRouter>
-    )
-  }
-  ```
-
-## Web Coverage
-
-**Requirements:** None enforced
-
-**Config:**
-```javascript
-// vite.config.js
-coverage: {
-  provider: 'v8',
-  reporter: ['text', 'json-summary'],
-}
-```
-
-## Common Async Patterns
-
-**Go:**
-- Context with timeout for DB/external calls: `ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second); defer cancel()`
-- Background job polling with `select { case <-ctx.Done(): return; default: }`
-
-**JavaScript:**
-- `async/await` with `try/catch` in components
-- `waitFor` from `@testing-library/react` for async DOM assertions
+**Time Manipulation:**
+- Go: inject `nowFunc` into structs to override time in tests (e.g., `Pool.nowFunc`)
+- `miniredis.FastForward(duration)` for advancing Redis TTLs
 
 ---
 

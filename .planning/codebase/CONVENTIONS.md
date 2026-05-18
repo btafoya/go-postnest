@@ -2,139 +2,177 @@
 
 **Analysis Date:** 2026-05-18
 
-## Languages
-
-**Primary:**
-- Go 1.25 - Backend services, API handlers, SMTP/IMAP workers, database layer
-- JavaScript (JSX) - React frontend (Vite-based SPA)
-
 ## Naming Patterns
 
 **Go Files:**
-- Package matches directory name exactly: `package calendar`, `package auth`
-- Core implementation: `handler.go`, `pgstore.go`, `models.go`, `dto.go`
-- Entry points: `main.go` in `cmd/<binary>/`
-- Tests: `<name>_test.go` co-located with source
+- All lowercase, no underscores: `auth.go`, `webmail_test.go`, `dto.go`
+- Test suffix: `*_test.go`, co-located with source
+- Package name matches directory: `package webmail` in `internal/webmail/`
 
 **Go Types:**
-- Exported types: PascalCase (`Service`, `Handler`, `Pool`, `Store`)
-- Unexported types: camelCase (`smtpBackend`, `loginServer`, `testProcessor`)
-- Interfaces: noun or `-er` suffix (`Store`, `DomainLister`, `Processor`)
-- Struct tags: backtick-quoted with snake_case JSON keys: `` `json:"user_id"` ``
+- Exported: PascalCase (e.g., `Service`, `Handler`, `AppError`, `MessagePatch`)
+- Unexported: camelCase (e.g., `loginServer`, `addrDTO`, `labelOut`)
+- DTO structs: suffix `DTO` (e.g., `addrDTO`, `messageDTO`)
+- Interface names: describe capability (e.g., `DomainLister`, `Store`)
 
 **Go Functions:**
-- Exported: PascalCase (`NewService`, `Authenticate`, `RegisterRoutes`)
-- Unexported: camelCase (`hashPassword`, `verifyPassword`, `setupTestRedis`)
-- DTO conversion: `to[Entity]DTO` and `to[Entity]DTOs` (`toMessageDTO`, `toCalendarDTO`)
-- Handler helpers: short names like `ctx(r)` to extract domain/user from request context
+- Exported: PascalCase (e.g., `NewService`, `Authenticate`, `WriteError`)
+- Unexported: camelCase (e.g., `hashPassword`, `verifyPassword`, `snippet`, `extractAddresses`)
+- Constructor pattern: `New{Type}` (e.g., `NewService`, `NewHandler`, `NewPool`)
 
 **Go Variables:**
-- Short names in tight scopes (`m` for miniredis, `c` for client, `h` for handler)
-- Constants for queue names: `queueJobs`, `queueDelayed`, `queueDead`
+- Short names in tight scope (e.g., `u`, `did`, `ctx`)
+- Descriptive names for fields and package-level vars (e.g., `maxAttachmentSize`, `sessionKey`)
+- Error variables: `Err{Description}` prefix (e.g., `ErrNotFound`, `ErrUnauthorized`, `ErrInvalidCredentials`)
 
-**JavaScript/React:**
-- Components: PascalCase filename matching component name (`MessageView.jsx`, `RichEditor.jsx`)
-- Default exports for page/components
-- Named exports for utilities (`export function parseRecipients`, `export function htmlToText`)
-- API functions: camelCase matching endpoint semantics (`getMessages`, `patchMessage`, `createDraft`)
-- Props: camelCase (`htmlBody`, `onChange`)
-- State variables: camelCase (`selectedIds`, `loading`, `currentLabel`)
+**Go Constants:**
+- camelCase for unexported string constants (e.g., `queueJobs`, `queueDelayed`, `queueDead`)
+- Context keys use typed string constants: `type ctxKey string; const ctxKeyUser ctxKey = "user"`
+
+**Frontend Files:**
+- Components: PascalCase with `.jsx` extension (e.g., `MessageView.jsx`, `RichEditor.jsx`)
+- Utilities: camelCase with `.js` extension (e.g., `api.js`, `sse.js`)
+
+**Frontend Components/Functions:**
+- Components: PascalCase, default export (e.g., `export default function MessageView()`)
+- API functions: camelCase (e.g., `getMessage`, `patchMessage`, `parseRecipients`)
+- Hook variables: destructured from React imports (e.g., `useState`, `useEffect`)
 
 ## Code Style
 
 **Formatting:**
-- Go: Standard `gofmt` (no custom config detected)
-- JavaScript: No explicit Prettier or ESLint config present
-- Go imports are grouped: stdlib, third-party, internal module
+- Go: standard `gofmt` (no custom formatter config detected)
+- Frontend: no explicit formatter config; Vite handles build
+
+**Linting:**
+- No `.golangci.yml`, `.eslintrc`, or `biome.json` detected
+- Only lint override observed: `// eslint-disable-next-line react-hooks/exhaustive-deps` in `RichEditor.jsx`
+
+## Import Organization
 
 **Go Import Order:**
+1. Standard library
+2. Third-party packages
+3. Internal packages (full module path)
+
+Example from `internal/webmail/webmail.go`:
 ```go
 import (
-    "context"
     "encoding/json"
-    "net/http"
+    "fmt"
+    "context"
+    // ... stdlib
 
-    "github.com/go-chi/chi/v5"
     "github.com/google/uuid"
+    "github.com/go-chi/chi/v5"
+    // ... third-party
 
     "github.com/go-postnest/postnest/internal/api"
+    "github.com/go-postnest/postnest/internal/mailstore"
     "github.com/go-postnest/postnest/internal/models"
+    // ... internal
 )
 ```
 
-**Tailwind CSS:**
-- Custom color palette defined in `web/tailwind.config.js`
-  - `primary-50` through `primary-700` (blue family)
-  - `surface-50` through `surface-900` (gray family)
-- Utility-first class names in JSX
+**Frontend Imports:**
+- React and hooks first
+- Third-party libraries (axios, DOMPurify, lucide-react)
+- Local modules with relative paths (`../api`, `../components/MessageView`)
 
 ## Error Handling
 
-**Go Backend:**
-- Unified `AppError` type in `internal/api/errors.go`
-- Sentinel errors as package-level vars:
+**Go Patterns:**
+- Return `error` as last value from every function that can fail
+- Use sentinel errors for known conditions:
   ```go
-  var (
-      ErrNotFound     = &AppError{Code: "not_found", Message: "Resource not found", StatusCode: http.StatusNotFound}
-      ErrUnauthorized = &AppError{Code: "unauthorized", Message: "Authentication required", StatusCode: http.StatusUnauthorized}
-  )
+  var ErrNotFound = &AppError{Code: "not_found", Message: "Resource not found", StatusCode: http.StatusNotFound}
   ```
-- Validation errors: `NewValidationError([]FieldError{{Field: "domain_id", Issue: "required"}})`
-- HTTP response pattern: `api.WriteError(w, err)` in all handlers
-- Custom `As` wrapper around `errors.As` for error type assertion
-- Panic recovery via middleware: `defer` + `recover()` logs stack trace and returns 500
+- Custom error type: `api.AppError` with `Code`, `Message`, `Details`, `StatusCode`
+- HTTP handler pattern: check error, call `api.WriteError(w, err)`, return immediately
+  ```go
+  msg, err := h.store.GetMessage(r.Context(), did, u.ID, id)
+  if err != nil {
+      api.WriteError(w, err)
+      return
+  }
+  ```
+- Database: check `pgx.ErrNoRows` explicitly to convert to domain errors
+- No `panic` in production code; recovery middleware catches panics in HTTP layer
 
-**Frontend:**
-- Axios response interceptor redirects to `/login` on 401 (excluding auth endpoints)
-- Console logging for non-critical fetch failures (`console.error`)
-- Inline error display via `notice` state variables in components
+**Frontend Patterns:**
+- API interceptor redirects to `/login` on 401 for non-auth endpoints
+- Component errors logged via `console.error` (e.g., `.catch(console.error)`)
+- DOMPurify for HTML sanitization before rendering
 
 ## Logging
 
-**Framework:** `log/slog` (structured JSON)
-- Logger creation: `internal/logger/logger.go`
-- Pattern: key-value pairs after message string
-  ```go
-  logger.Info("request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(start).String())
-  slog.Error("job failed", "type", job.Type, "error", err)
-  ```
-- Request logging middleware records method, path, duration, and request ID
+**Framework:** `log/slog` (structured JSON logging)
+
+**Patterns:**
+- Use `slog.New(slog.NewJSONHandler(os.Stdout, ...))` for production
+- Key-value pairs: `logger.Info("request", "method", r.Method, "path", r.URL.Path)`
+- Error logging: `logger.Error("job failed", "type", job.Type, "error", err)`
+- Panic recovery logs stack trace via `debug.Stack()`
 
 ## Comments
 
 **When to Comment:**
-- Exported functions and types: brief purpose description
-- Non-obvious logic: `// Accept the frontend contract (title/start/end) with backend aliases`
-- Security-critical: `// Allow plaintext IMAP/SMTP auth without TLS`
+- Every exported type and function gets a Go-doc comment
+- Comments explain purpose, not mechanics
+- Inline comments for non-obvious SQL or business logic
 
-**JSDoc/TSDoc:**
-- Not used
+**Examples:**
+```go
+// Service handles authentication, sessions, and password hashing.
+type Service struct { ... }
+
+// hashPassword creates an Argon2id hash.
+func (s *Service) hashPassword(password string) (string, error) { ... }
+```
 
 ## Function Design
 
-**Go:**
-- Constructor pattern: `New[Type](...)` returns pointer
-- Service structs hold dependencies as fields (`pool`, `store`, `auth`)
-- Handlers receive store/auth via constructor, not globals
-- Short functions preferred; `ctx(r)` helper encapsulates repeated context extraction
+**Size:**
+- Handlers are moderate (20-60 lines); large files split by concern
+- Largest file: `internal/mailstore/pgstore.go` (~700 lines)
 
-**React:**
-- Functional components with hooks
-- Custom hook pattern not observed; direct `useState`/`useEffect` in components
-- Callback memoization with `useCallback` for fetch functions
+**Parameters:**
+- `context.Context` is always first parameter when needed
+- Pointer receivers for stateful types (`*Service`, `*Handler`, `*Pool`)
+- Value receivers for pure functions (e.g., `parseAddr`)
+
+**Return Values:**
+- `(result, error)` pattern universally
+- Tuple returns for related data (e.g., `(*models.AuthSession, string, error)`)
 
 ## Module Design
 
-**Go:**
-- No barrel files
-- Each package is self-contained
-- Interfaces defined in consumer packages or shared `internal/mailstore`
-- `internal/` prefix enforced by Go module structure
+**Exports:**
+- Packages export a small public surface: constructor + methods + interfaces
+- Interfaces defined in the consumer package when possible (e.g., `DomainLister` in `webmail`, `Store` in `mailstore`)
 
-**JavaScript:**
-- `api.js` centralizes all API calls as named exports
-- Components live in `web/src/components/`
-- No index.js re-exports observed
+**Barrel Files:**
+- Not used in Go
+- Frontend: `api.js` is a flat barrel of all API functions; `sse.js` is standalone
+
+## Frontend Specific Conventions
+
+**Component Structure:**
+- Default export at bottom for single-export files
+- Hooks at top of component body
+- JSX uses TailwindCSS utility classes exclusively
+- Event handlers use inline arrow functions or named async functions
+
+**API Pattern:**
+- All API calls go through `axios` instance in `web/src/api.js`
+- CSRF token attached via request interceptor from `csrf` cookie
+- `withCredentials: true` on all requests
+- Response interceptor handles global 401 redirect
+
+**Security:**
+- HTML email rendered in sandboxed iframe (`sandbox=""`)
+- `DOMPurify.sanitize()` before injecting HTML
+- `DOMParser` for deriving plain text from HTML (no live DOM assignment)
 
 ---
 

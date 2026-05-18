@@ -5,122 +5,101 @@
 ## Languages
 
 **Primary:**
-- Go 1.25.0 - Backend services, IMAP/SMTP servers, worker pool, API handlers, migrations (`cmd/`, `internal/`)
-- JavaScript (JSX) - Frontend web UI (`web/src/`)
-- SQL - Embedded PostgreSQL migrations (`internal/migrate/migrations/*.sql`)
+- Go 1.25.0 — Backend services, protocol implementations, workers, migration CLI
+- JavaScript (JSX/ES modules) — Frontend SPA (`web/src/**/*.jsx`)
+- SQL — PostgreSQL schema migrations (`internal/migrate/migrations/*.sql`)
 
 **Secondary:**
-- Nix - Development shell and package definitions (`flake.nix`, `nix/`)
-- Dockerfile - Multi-stage container builds (`Dockerfile.server`, `Dockerfile.webui`, `Dockerfile.worker`, `Dockerfile.migrate`)
+- TOML — Server configuration file format (`internal/config/loader.go`)
+- Nix — Development shell and build definitions (`flake.nix`, `nix/module.nix`)
+- HTML/CSS — Embedded web UI shell (`web/index.html`, Tailwind utility classes)
 
 ## Runtime
 
 **Environment:**
-- Go 1.25 (compiled binaries, statically linked with `CGO_ENABLED=0`)
-- Node.js 22 (frontend build only, via `node:22-alpine` in `Dockerfile.webui`)
+- Go 1.25 (compiled with `CGO_ENABLED=0`, static Linux binary)
+- Node.js 22 — Used only at build time for the frontend SPA (multi-stage Docker)
 
 **Package Manager:**
-- Go Modules (`go.mod`, `go.sum` present)
-- npm (`web/package.json`, `web/package-lock.json` present)
+- Go modules — `go.mod` / `go.sum` present, lockfile committed
+- npm — `web/package-lock.json` present, lockfile committed
 
-**Lockfiles:**
-- `go.sum` - Go dependency checksums
-- `web/package-lock.json` - npm dependency checksums
+**Deployment Images:**
+- `gcr.io/distroless/static-debian12:nonroot` for all Go binaries
+- `postgres:16-alpine` for local datastore
+- `redis:7-alpine` for local queue/cache
 
 ## Frameworks
 
-**Core Backend:**
-- `github.com/go-chi/chi/v5` v5.2.5 - HTTP router and middleware for the main API server (`cmd/server/main.go`)
-- `github.com/gin-gonic/gin` v1.12.0 - HTTP router for the web UI reverse-proxy server (`cmd/webui/main.go`, `internal/webui/router.go`)
+**Core (Backend):**
+- `github.com/go-chi/chi/v5` v5.2.5 — HTTP router/middleware for REST API and webhook handlers
+- `github.com/emersion/go-imap` v1.2.1 — IMAP4rev1 server implementation
+- `github.com/emersion/go-smtp` v0.24.0 — SMTP submission server with AUTH PLAIN
+- `github.com/emersion/go-message` v0.18.2 — RFC822 / MIME parsing and generation
+- `github.com/emersion/go-webdav` v0.7.0 — WebDAV / CardDAV / CalDAV backend
+- `github.com/emersion/go-ical` v0.0.0-20250609112844-439c63cef608 — iCalendar parsing/generation
+- `github.com/emersion/go-vcard` v0.0.0-20241024213814-c9703dde27ff — vCard parsing/generation
+- `github.com/mrz1836/postmark` v1.9.2 — Postmark email API client
+- `github.com/jackc/pgx/v5` v5.9.2 — PostgreSQL driver with connection pool (`pgxpool`)
+- `github.com/redis/go-redis/v9` v9.19.0 — Redis client
+- `github.com/golang-migrate/migrate/v4` v4.19.1 — Database migrations
+- `github.com/go-acme/lego/v4` v4.35.2 — ACME/Let's Encrypt certificate automation
+- `github.com/BurntSushi/toml` v1.6.0 — Configuration file parsing
 
-**Frontend:**
-- React 19.0.0 - UI framework (`web/src/main.jsx`)
-- React Router DOM 7.0.0 - Client-side routing (`web/src/App.jsx`)
-- Vite 6.0.0 - Build tool and dev server (`web/vite.config.js`)
-- Tailwind CSS 3.4.15 - Utility-first CSS (`web/tailwind.config.js`)
-- PostCSS 8.4.49 + Autoprefixer 10.4.20 - CSS processing (`web/postcss.config.js`)
+**Core (Frontend):**
+- React 19.0.0 — UI framework (`web/package.json`)
+- react-router-dom 7.0.0 — Client-side routing (`web/src/main.jsx`)
+- Vite 6.0.0 — Build tool and dev server (`web/vite.config.js`)
+- TailwindCSS 3.4.15 — Utility-first CSS (`web/tailwind.config.js`)
+- PostCSS 8.4.49 + Autoprefixer 10.4.20 — CSS pipeline (`web/postcss.config.js`)
+- TipTap 3.23.4 (`@tiptap/react`, `@tiptap/starter-kit`, `@tiptap/pm`) — Rich text compose editor
+- axios 1.7.0 — HTTP client with CSRF double-submit interceptor (`web/src/api.js`)
+- date-fns 4.1.0 — Date formatting
+- DOMPurify 3.4.4 — HTML sanitization for inbound message rendering
+- lucide-react 0.460.0 — Icon set
 
 **Testing:**
-- Vitest 4.1.6 - Frontend test runner (`web/vite.config.js`)
-- `@vitest/coverage-v8` 4.1.6 - Coverage reporting
-- `@testing-library/react` 16.3.2 + `@testing-library/jest-dom` 6.9.1 - React component testing
-- `jsdom` 29.1.1 - Browser environment for tests
-- `msw` 2.14.6 - Mock Service Worker for API mocking in tests
-- Go `testing` standard library - Backend tests (`internal/calendar/ical_test.go`)
+- Go standard `testing` package — All backend unit tests (no third-party assertion library detected)
+- Vitest 4.1.6 — Frontend test runner (`web/vite.config.js` test block)
+- @testing-library/react 16.3.2 — React component tests
+- @testing-library/jest-dom 6.9.1 — Custom DOM matchers
+- jsdom 29.1.1 — Browser environment for Vitest
+- msw 2.14.6 — Mock Service Worker for API mocking in frontend tests
+- miniredis/v2 2.38.0 — In-memory Redis for Go tests (`internal/redis/redis_test.go`)
 
 **Build/Dev:**
-- Vite (frontend build)
-- Make (`Makefile`) - Orchestrates Go binary builds and admin CLI tasks
-- golangci-lint (Nix devShell) - Go linting
-- `air` (Nix devShell) - Go live-reload
+- `make` — Build orchestration (`Makefile`)
+- Docker + Docker Compose — Local orchestration (`docker-compose.yml`, `Dockerfile.server`, `Dockerfile.webui`, `Dockerfile.worker`, `Dockerfile.migrate`)
+- Nix flake — Reproducible dev shell and NixOS module (`flake.nix`)
 
 ## Key Dependencies
 
-**Critical Infrastructure:**
-- `github.com/jackc/pgx/v5` v5.9.2 - PostgreSQL driver and connection pool (`internal/db/db.go`)
-- `github.com/redis/go-redis/v9` v9.19.0 - Redis client, used for job queue, pub/sub, and caching (`internal/redis/redis.go`)
-- `github.com/golang-migrate/migrate/v4` v4.19.1 - Database migrations with embedded SQL files (`internal/migrate/migrate.go`)
+**Critical:**
+- `github.com/mrz1836/postmark` v1.9.2 — Sole email transport provider for outbound sending and inbound webhook parsing
+- `github.com/jackc/pgx/v5` v5.9.2 — Primary datastore driver; all SQL is explicit (no ORM)
+- `github.com/redis/go-redis/v9` v9.19.0 — Worker queue backend, delayed job scheduling, webhook deduplication
+- `github.com/emersion/go-imap` / `go-smtp` / `go-message` / `go-webdav` — Protocol layer; do not replace with custom implementations
+- `golang.org/x/crypto` v0.51.0 — Argon2id password hashing and TLS support
 
-**Mail & Protocols:**
-- `github.com/emersion/go-imap` v1.2.1 - IMAP server implementation (`internal/imap/imap.go`)
-- `github.com/emersion/go-smtp` v0.24.0 - SMTP server implementation (`internal/smtp/smtp.go`)
-- `github.com/emersion/go-message` v0.18.2 - MIME message parsing (`internal/smtp/smtp.go`)
-- `github.com/emersion/go-sasl` v0.0.0-20241020182733-b788ff22d5a6 - SASL authentication mechanisms (`internal/smtp/smtp.go`)
-- `github.com/emersion/go-ical` v0.0.0-20250609112844-439c63cef608 - iCalendar parsing and generation (`internal/calendar/ical.go`)
-- `github.com/emersion/go-vcard` v0.0.0-20241024213814-c9703dde27ff - vCard parsing and generation (`internal/dav/dav.go`)
-- `github.com/emersion/go-webdav` v0.7.0 - WebDAV/CardDAV/CalDAV server backend (`internal/dav/dav.go`)
-
-**Email Delivery:**
-- `github.com/mrz1836/postmark` v1.9.2 - Postmark API client for outbound email and inbound webhook parsing (`internal/postmark/postmark.go`)
-
-**Security & Auth:**
-- `golang.org/x/crypto` v0.51.0 - Argon2id password hashing (`internal/auth/auth.go`)
-- `github.com/go-acme/lego/v4` v4.35.2 - ACME/Let's Encrypt certificate automation (`cmd/server/main.go`)
-
-**Data & Serialization:**
-- `github.com/google/uuid` v1.6.0 - UUID v7 generation throughout the codebase
-- `github.com/BurntSushi/toml` v1.6.0 - TOML parsing
-- `github.com/goccy/go-yaml` v1.19.2 - YAML parsing (indirect)
-
-**Frontend UI:**
-- `@tiptap/react` 3.23.4 + `@tiptap/starter-kit` 3.23.4 + `@tiptap/pm` 3.23.4 - Rich text editor (`web/src/components/RichEditor.jsx`)
-- `axios` 1.7.0 - HTTP client for backend API (`web/src/api.js`)
-- `date-fns` 4.1.0 - Date formatting and manipulation
-- `dompurify` 3.4.4 - HTML sanitization
-- `lucide-react` 0.460.0 - Icon library
+**Infrastructure:**
+- `github.com/golang-migrate/migrate/v4` v4.19.1 — Schema versioning (`internal/migrate/migrations/`)
+- `github.com/google/uuid` v1.6.0 — UUID generation (v7 used for job IDs)
+- `github.com/go-acme/lego/v4` v4.35.2 — Automatic TLS certificate provisioning via DNS-01
+- `github.com/microcosm-cc/bluemonday` v1.0.27 / `github.com/aymerick/douceur` v0.2.0 — HTML sanitization pipelines (indirect, via gin-contrib)
 
 ## Configuration
 
-**Environment Variables (Backend):**
-All backend services load configuration from environment variables with `POSTNEST_` prefix. See `internal/config/config.go` for the full schema.
+**Environment:**
+- Primary source: TOML file at `/etc/postnest/postnest.conf` (default), overridable via `POSTNEST_CONFIG_PATH`
+- Override layer: Environment variables using `POSTNEST_<SECTION>_<KEY>` naming (`internal/config/loader.go`)
+- Legacy fallback: Bare env vars (e.g., `POSTGRES_DSN`, `SESSION_KEY`) still honored for backward compatibility
+- `.env` file present at repo root but **not** read by the Go application; it is consumed by Docker Compose only
 
-Key variables:
-- `POSTNEST_DATABASE_DSN` / `POSTNEST_POSTGRES_DSN` - PostgreSQL connection string
-- `POSTNEST_REDIS_URL` - Redis connection URL (default `redis://localhost:6379/0`)
-- `POSTNEST_SECURITY_SESSION_KEY` - Session signing key (required)
-- `POSTNEST_POSTMARK_WEBHOOK_SECRET` - Postmark webhook HMAC secret
-- `POSTNEST_TLS_CERT_PATH` / `POSTNEST_TLS_KEY_PATH` - Static TLS certificate paths
-- `POSTNEST_ACME_ENABLED` / `POSTNEST_ACME_EMAIL` / `POSTNEST_ACME_DOMAIN` - ACME auto-TLS
-- `POSTNEST_WORKER_CONCURRENCY` / `POSTNEST_WORKER_POLL_INTERVAL` - Worker pool tuning
-
-**Environment Variables (WebUI):**
-- `WEBUI_ADDR` - Bind address (default `:3000`)
-- `WEBUI_API_BASE_URL` - Backend API proxy target (default `http://localhost:8080`)
-- `WEBUI_REDIS_URL` - Redis for SSE pub/sub
-- `WEBUI_ALLOWED_ORIGINS` - CORS origins
-
-**Build Configuration:**
-- `web/vite.config.js` - Vite build config, outputs to `../internal/webui/dist`
-- `web/tailwind.config.js` - Tailwind theme with custom `primary` and `surface` color palettes
-- `Makefile` - Build targets for `postnest-server`, `postnest-webui`, `postnest-admin`, `postnest-worker`, `postnest-migrate`
-- `flake.nix` - Nix development shell with Go 1.25, PostgreSQL 16, Redis, golangci-lint, air, go-migrate
-
-**Docker:**
-- `docker-compose.yml` - Orchestrates postgres:16-alpine, redis:7-alpine, server, webui, worker, migrate services
-- `Dockerfile.server` - Multi-stage Go build, distroless nonroot runtime, exposes 8080/143/587/993/465
-- `Dockerfile.webui` - Multi-stage Node+Go build, embeds Vite dist, distroless nonroot runtime, exposes 3000
-- `Dockerfile.worker` - Similar to server for worker binary
-- `Dockerfile.migrate` - Migration runner binary
+**Build:**
+- `web/vite.config.js` — SPA build, outputs to `internal/webui/dist` with `emptyOutDir: true`
+- `web/tailwind.config.js` — Custom color tokens (`primary`, `surface` scales)
+- `go:embed` — Embeds `internal/webui/dist` into the `webui` binary
+- `Makefile` — Defines `build-server`, `build-webui`, `build-worker`, `build-migrate`, `build-admin`
 
 ## Platform Requirements
 
@@ -129,16 +108,13 @@ Key variables:
 - Node.js 22+ (for frontend builds)
 - PostgreSQL 16+
 - Redis 7+
-- Make (optional)
+- `make` (optional)
 - Docker + Docker Compose (optional)
 
 **Production:**
-- Container runtime (Docker or Kubernetes) recommended
-- PostgreSQL 16+ with `pgcrypto` extension (for `gen_random_uuid()`)
-- Redis 7+ for job queue and pub/sub
-- TLS certificate (static files or ACME auto-provisioning)
-- Inbound internet access on ports 143/587 (or 993/465 with TLS) for IMAP/SMTP
-- Outbound internet access for Postmark API (`api.postmarkapp.com`)
+- Deployment target: Linux containers (distroless static images)
+- Optional: NixOS via `nixosModules.postnest`
+- Optional: Systemd service wrapper (architecture approved per `CLAUDE.md`, not yet wired in current binary builds)
 
 ---
 
