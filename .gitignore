@@ -17,3 +17,5 @@ skills-lock.json
 # Node modules
 web/node_modules/
 web/package-lock.json
+# Playwright MCP test artifacts
+.playwright-mcp/

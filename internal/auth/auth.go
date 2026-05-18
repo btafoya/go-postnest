@@ -144,7 +144,7 @@ func (s *Service) ValidateSession(ctx context.Context, token string) (*models.Au
 	hashStr := base64.RawStdEncoding.EncodeToString(hash[:])
 
 	row := s.pool.QueryRow(ctx, `
-		SELECT s.id, s.user_id, s.token_hash, s.type, s.expires_at, s.last_used_at, s.ip_address, s.user_agent, s.created_at,
+		SELECT s.id, s.user_id, s.token_hash, s.type, s.expires_at, s.last_used_at, host(s.ip_address), s.user_agent, s.created_at,
 			u.id, u.email, u.display_name, u.timezone, u.locale, u.is_super_admin, u.created_at, u.updated_at
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
@@ -175,7 +175,7 @@ func (s *Service) ValidateAPIKey(ctx context.Context, key string) (*models.AuthS
 	hashStr := base64.RawStdEncoding.EncodeToString(hash[:])
 
 	row := s.pool.QueryRow(ctx, `
-		SELECT s.id, s.user_id, s.token_hash, s.type, s.expires_at, s.last_used_at, s.ip_address, s.user_agent, s.created_at,
+		SELECT s.id, s.user_id, s.token_hash, s.type, s.expires_at, s.last_used_at, host(s.ip_address), s.user_agent, s.created_at,
 			u.id, u.email, u.display_name, u.timezone, u.locale, u.is_super_admin, u.created_at, u.updated_at
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
@@ -323,7 +323,7 @@ func (s *Service) IsDomainMember(ctx context.Context, userID, domainID uuid.UUID
 // GetDomainByID fetches a domain by its ID.
 func (s *Service) GetDomainByID(ctx context.Context, id uuid.UUID) (*models.Domain, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, name, postmark_token, postmark_stream, created_at, updated_at, settings
+		SELECT id, name, COALESCE(postmark_token,''), COALESCE(postmark_stream,''), created_at, updated_at, settings
 		FROM domains WHERE id=$1
 	`, id)
 	var d models.Domain
@@ -337,7 +337,7 @@ func (s *Service) GetDomainByID(ctx context.Context, id uuid.UUID) (*models.Doma
 // GetDomainByName fetches a domain by its name.
 func (s *Service) GetDomainByName(ctx context.Context, name string) (*models.Domain, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, name, postmark_token, postmark_stream, created_at, updated_at, settings
+		SELECT id, name, COALESCE(postmark_token,''), COALESCE(postmark_stream,''), created_at, updated_at, settings
 		FROM domains WHERE name=$1
 	`, name)
 	var d models.Domain

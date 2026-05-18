@@ -16,6 +16,7 @@ export default function Inbox() {
   const [selectedIds, setSelectedIds] = useState(new Set())
   const [offset, setOffset] = useState(0)
   const [total, setTotal] = useState(0)
+  const [notice, setNotice] = useState('')
   const limit = 50
 
   const currentLabel = labels.find((l) => l.id === labelId) || { name: 'Inbox', id: null }
@@ -69,11 +70,16 @@ export default function Inbox() {
   const handleBatch = async (action) => {
     if (selectedIds.size === 0) return
     try {
-      await batchMessages(action, Array.from(selectedIds))
+      const res = await batchMessages(action, Array.from(selectedIds))
+      if (res?.failed?.length > 0) {
+        setNotice(`${res.failed.length} of ${selectedIds.size} message(s) failed to ${action}`)
+      } else {
+        setNotice('')
+      }
       fetchMessages()
       setSelectedIds(new Set())
     } catch (err) {
-      console.error('Batch action failed:', err)
+      setNotice(`Batch ${action} failed: ${err.response?.data?.error?.message || err.message}`)
     }
   }
 
@@ -123,6 +129,13 @@ export default function Inbox() {
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {notice && (
+        <div className="flex items-center justify-between bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          <span>{notice}</span>
+          <button onClick={() => setNotice('')} className="text-amber-600 hover:text-amber-900">×</button>
+        </div>
+      )}
 
       {/* Message list */}
       <div className="flex-1 overflow-y-auto">

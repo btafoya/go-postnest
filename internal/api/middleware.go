@@ -24,6 +24,7 @@ const (
 	ctxKeyUser      ctxKey = "user"
 	ctxKeyDomainID  ctxKey = "domain_id"
 	ctxKeyRequestID ctxKey = "request_id"
+	ctxKeySession   ctxKey = "session"
 )
 
 // RequestID middleware injects a unique request ID.
@@ -97,15 +98,15 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 }
 
 // SetSessionCookie writes a secure session cookie.
-func SetSessionCookie(w http.ResponseWriter, token string, secure bool) {
+func SetSessionCookie(w http.ResponseWriter, token string, secure bool, maxAge time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "session",
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   86400 * 7,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(maxAge.Seconds()),
 	})
 }
 
@@ -128,7 +129,7 @@ func RequireSession(svc *auth.Service) func(http.Handler) http.Handler {
 				}
 			}
 			ctx := context.WithValue(r.Context(), ctxKeyUser, user)
-			ctx = context.WithValue(ctx, ctxKeyRequestID, session)
+			ctx = context.WithValue(ctx, ctxKeySession, session)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -264,6 +265,14 @@ func DomainIDFromContext(ctx context.Context) uuid.UUID {
 		return id
 	}
 	return uuid.Nil
+}
+
+// SessionFromContext returns the authenticated session.
+func SessionFromContext(ctx context.Context) *models.AuthSession {
+	if s, ok := ctx.Value(ctxKeySession).(*models.AuthSession); ok {
+		return s
+	}
+	return nil
 }
 
 // RequestIDFromContext returns the request ID.

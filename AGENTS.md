@@ -459,7 +459,21 @@ Users may belong to multiple domains.
 
 Framework:
 
-Gin
+React 19 + Vite + TailwindCSS
+
+(Ratified. Supersedes the prior Gin/HTMX directive — the React frontend
+shipped in commit 6529168 and is the official UI stack. Do not migrate to
+Gin templates or HTMX.)
+
+Stack:
+
+- React 19 (function components, hooks)
+- Vite build → `internal/webui/dist` (embedded via `go:embed`)
+- react-router-dom v7 for client-side routing
+- axios HTTP client, `withCredentials`, CSRF double-submit (`X-CSRF-Token`)
+- TipTap for the rich compose editor
+- DOMPurify + sandboxed iframe for inbound HTML rendering
+- TailwindCSS for styling
 
 UI style:
 
@@ -468,19 +482,14 @@ Gmail-inspired
 Features:
 
 - threaded conversations
-- rich compose editor
+- rich compose editor (TipTap)
 - autosave drafts
 - labels
 - drag/drop attachments
 - keyboard shortcuts
 
-Do not introduce React unless requested.
-
-Prefer:
-
-- Gin templates
-- HTMX
-- Tailwind
+The `webui` binary serves the embedded SPA and reverse-proxies API calls;
+do not add a second frontend framework.
 
 ---
 
@@ -564,3 +573,9 @@ PLAN.md overrides feature intent.
 INTEGRATION.md overrides package wiring.
 
 Follow them in that order.
+
+---
+
+## Structure
+
+- .planning/codebase/STRUCTURE.md

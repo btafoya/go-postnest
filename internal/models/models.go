@@ -149,6 +149,42 @@ type AuthSession struct {
 }
 
 
+// Calendar is a user's calendar collection (CalDAV).
+type Calendar struct {
+	ID          uuid.UUID
+	DomainID    uuid.UUID
+	UserID      uuid.UUID
+	Name        string
+	Color       string
+	Description string
+	CTag        int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// CalendarEvent is a single event (VEVENT) within a calendar.
+type CalendarEvent struct {
+	ID          uuid.UUID
+	CalendarID  uuid.UUID
+	DomainID    uuid.UUID
+	UserID      uuid.UUID
+	UID         string
+	Summary     string
+	Description string
+	Location    string
+	StartsAt    time.Time
+	EndsAt      time.Time
+	AllDay      bool
+	RRule       string
+	Status      string
+	Organizer   string
+	Attendees   []string
+	Sequence    int
+	ETag        string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 // ParseUUID parses a UUID string.
 func ParseUUID(s string) (uuid.UUID, error) {
 	u, err := uuid.Parse(s)

@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-webdav/caldav"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/go-postnest/postnest/internal/calendar"
 	"github.com/go-postnest/postnest/internal/contacts"
 	"github.com/go-postnest/postnest/internal/mailstore"
 	"github.com/go-postnest/postnest/internal/models"
@@ -29,16 +30,18 @@ type Handler struct {
 	auth      *auth.Service
 	contacts  contacts.Store
 	mailstore mailstore.Store
+	calendar  calendar.Store
 	carddavH  *carddav.Handler
 	caldavH   *caldav.Handler
 }
 
 // NewHandler creates a DAV handler.
-func NewHandler(auth *auth.Service, contactsStore contacts.Store, mailstore mailstore.Store) *Handler {
+func NewHandler(auth *auth.Service, contactsStore contacts.Store, mailstore mailstore.Store, calendarStore calendar.Store) *Handler {
 	h := &Handler{
 		auth:      auth,
 		contacts:  contactsStore,
 		mailstore: mailstore,
+		calendar:  calendarStore,
 	}
 	h.carddavH = &carddav.Handler{
 		Backend: &carddavBackend{handler: h},
@@ -258,10 +261,22 @@ func contactIDFromPath(path string) (uuid.UUID, error) {
 	return uuid.Parse(base)
 }
 
-// --- CalDAV stub ---
+// --- CalDAV backend ---
 
 type caldavBackend struct {
 	handler *Handler
+}
+
+func (b *caldavBackend) ctx(ctx context.Context) (*models.User, uuid.UUID, error) {
+	user := userFromContext(ctx)
+	if user == nil {
+		return nil, uuid.Nil, fmt.Errorf("unauthorized")
+	}
+	domainID, err := domainIDFromUser(ctx, b.handler.auth, user)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	return user, domainID, nil
 }
 
 func (b *caldavBackend) CurrentUserPrincipal(ctx context.Context) (string, error) {
@@ -273,33 +288,173 @@ func (b *caldavBackend) CalendarHomeSetPath(ctx context.Context) (string, error)
 }
 
 func (b *caldavBackend) CreateCalendar(ctx context.Context, cal *caldav.Calendar) error {
-	return fmt.Errorf("not implemented")
+	user, domainID, err := b.ctx(ctx)
+	if err != nil {
+		return err
+	}
+	return b.handler.calendar.CreateCalendar(ctx, &models.Calendar{
+		DomainID: domainID, UserID: user.ID, Name: cal.Name, Description: cal.Description,
+	})
 }
 
 func (b *caldavBackend) ListCalendars(ctx context.Context) ([]caldav.Calendar, error) {
-	return nil, fmt.Errorf("not implemented")
+	user, domainID, err := b.ctx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cals, err := b.handler.calendar.ListCalendars(ctx, domainID, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]caldav.Calendar, 0, len(cals))
+	for _, c := range cals {
+		out = append(out, caldav.Calendar{
+			Path:                  fmt.Sprintf("/dav/calendar/%s/", c.ID),
+			Name:                  c.Name,
+			Description:           c.Description,
+			SupportedComponentSet: []string{ical.CompEvent},
+		})
+	}
+	return out, nil
 }
 
 func (b *caldavBackend) GetCalendar(ctx context.Context, path string) (*caldav.Calendar, error) {
-	return nil, fmt.Errorf("not implemented")
+	user, domainID, err := b.ctx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	calID, err := calendarIDFromPath(path)
+	if err != nil {
+		return nil, err
+	}
+	c, err := b.handler.calendar.GetCalendar(ctx, domainID, user.ID, calID)
+	if err != nil {
+		return nil, err
+	}
+	return &caldav.Calendar{
+		Path:                  fmt.Sprintf("/dav/calendar/%s/", c.ID),
+		Name:                  c.Name,
+		Description:           c.Description,
+		SupportedComponentSet: []string{ical.CompEvent},
+	}, nil
 }
 
 func (b *caldavBackend) GetCalendarObject(ctx context.Context, path string, req *caldav.CalendarCompRequest) (*caldav.CalendarObject, error) {
-	return nil, fmt.Errorf("not implemented")
+	calID, uid, err := objectPath(path)
+	if err != nil {
+		return nil, err
+	}
+	ev, err := b.handler.calendar.GetEvent(ctx, calID, uid)
+	if err != nil {
+		return nil, err
+	}
+	return eventToCalendarObject(ev)
 }
 
 func (b *caldavBackend) ListCalendarObjects(ctx context.Context, path string, req *caldav.CalendarCompRequest) ([]caldav.CalendarObject, error) {
-	return nil, fmt.Errorf("not implemented")
+	calID, err := calendarIDFromPath(path)
+	if err != nil {
+		return nil, err
+	}
+	events, err := b.handler.calendar.ListEvents(ctx, calID, time.Time{}, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]caldav.CalendarObject, 0, len(events))
+	for _, ev := range events {
+		obj, err := eventToCalendarObject(ev)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *obj)
+	}
+	return out, nil
 }
 
 func (b *caldavBackend) QueryCalendarObjects(ctx context.Context, path string, query *caldav.CalendarQuery) ([]caldav.CalendarObject, error) {
-	return nil, fmt.Errorf("not implemented")
+	return b.ListCalendarObjects(ctx, path, nil)
 }
 
-func (b *caldavBackend) PutCalendarObject(ctx context.Context, path string, calendar *ical.Calendar, opts *caldav.PutCalendarObjectOptions) (*caldav.CalendarObject, error) {
-	return nil, fmt.Errorf("not implemented")
+func (b *caldavBackend) PutCalendarObject(ctx context.Context, path string, cal *ical.Calendar, opts *caldav.PutCalendarObjectOptions) (*caldav.CalendarObject, error) {
+	user, domainID, err := b.ctx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	calID, uid, err := objectPath(path)
+	if err != nil {
+		return nil, err
+	}
+	var buf strings.Builder
+	if err := ical.NewEncoder(icalWriter{&buf}).Encode(cal); err != nil {
+		return nil, err
+	}
+	ev, err := calendar.ICSToEvent([]byte(buf.String()))
+	if err != nil {
+		return nil, err
+	}
+	ev.CalendarID = calID
+	ev.DomainID = domainID
+	ev.UserID = user.ID
+	if ev.UID == "" {
+		ev.UID = uid
+	}
+	if err := b.handler.calendar.PutEvent(ctx, ev); err != nil {
+		return nil, err
+	}
+	_ = b.handler.calendar.BumpCTag(ctx, calID)
+	return eventToCalendarObject(ev)
 }
 
 func (b *caldavBackend) DeleteCalendarObject(ctx context.Context, path string) error {
-	return fmt.Errorf("not implemented")
+	calID, uid, err := objectPath(path)
+	if err != nil {
+		return err
+	}
+	if err := b.handler.calendar.DeleteEvent(ctx, calID, uid); err != nil {
+		return err
+	}
+	return b.handler.calendar.BumpCTag(ctx, calID)
+}
+
+type icalWriter struct{ sb *strings.Builder }
+
+func (w icalWriter) Write(p []byte) (int, error) { return w.sb.Write(p) }
+
+func eventToCalendarObject(ev *models.CalendarEvent) (*caldav.CalendarObject, error) {
+	data, err := calendar.EventToICS(ev)
+	if err != nil {
+		return nil, err
+	}
+	cal, err := ical.NewDecoder(strings.NewReader(string(data))).Decode()
+	if err != nil {
+		return nil, err
+	}
+	return &caldav.CalendarObject{
+		Path:          fmt.Sprintf("/dav/calendar/%s/%s.ics", ev.CalendarID, ev.UID),
+		ModTime:       ev.UpdatedAt,
+		ContentLength: int64(len(data)),
+		ETag:          ev.ETag,
+		Data:          cal,
+	}, nil
+}
+
+func calendarIDFromPath(path string) (uuid.UUID, error) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if id, err := uuid.Parse(parts[i]); err == nil {
+			return id, nil
+		}
+	}
+	return uuid.Nil, fmt.Errorf("no calendar id in path")
+}
+
+func objectPath(path string) (uuid.UUID, string, error) {
+	base := filepath.Base(path)
+	uid := strings.TrimSuffix(base, filepath.Ext(base))
+	dir := filepath.Dir(path)
+	calID, err := calendarIDFromPath(dir)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	return calID, uid, nil
 }

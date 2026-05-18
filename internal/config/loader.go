@@ -68,6 +68,7 @@ type rawSecurity struct {
 	Argon2idThreads   uint8         `toml:"argon2id_threads"`
 	MaxMessageSize    int64         `toml:"max_message_size"`
 	MaxAttachmentSize int64         `toml:"max_attachment_size"`
+	AllowInsecureAuth bool          `toml:"allow_insecure_auth"`
 }
 
 type rawACME struct {
@@ -176,6 +177,7 @@ func (l *Loader) Load() (*Config, error) {
 		WorkerPollInterval:    raw.Worker.PollInterval,
 		MaxMessageSize:        raw.Security.MaxMessageSize,
 		MaxAttachmentSize:     raw.Security.MaxAttachmentSize,
+		AllowInsecureAuth:     raw.Security.AllowInsecureAuth,
 		ACMEEnabled:           raw.ACME.Enabled,
 		ACMEEmail:             raw.ACME.Email,
 		ACMEDomain:            raw.ACME.Domain,
@@ -291,6 +293,7 @@ func legacyEnv(newKey string) string {
 		"POSTNEST_WORKER_POLL_INTERVAL":         "WORKER_POLL_INTERVAL",
 		"POSTNEST_SECURITY_MAX_MESSAGE_SIZE":    "MAX_MESSAGE_SIZE",
 		"POSTNEST_SECURITY_MAX_ATTACHMENT_SIZE": "MAX_ATTACHMENT_SIZE",
+		"POSTNEST_SECURITY_ALLOW_INSECURE_AUTH": "ALLOW_INSECURE_AUTH",
 	}
 	if old, ok := legacy[newKey]; ok {
 		return os.Getenv(old)

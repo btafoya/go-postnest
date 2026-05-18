@@ -7,4 +7,13 @@ export default defineConfig({
     outDir: '../internal/webui/dist',
     emptyOutDir: true,
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './src/test/setup.js',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary'],
+    },
+  },
 })

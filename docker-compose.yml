@@ -39,6 +39,7 @@ services:
       POSTNEST_POSTMARK_WEBHOOK_SECRET: ${POSTNEST_POSTMARK_WEBHOOK_SECRET:-}
       POSTNEST_TLS_CERT_PATH: ${POSTNEST_TLS_CERT_PATH:-}
       POSTNEST_TLS_KEY_PATH: ${POSTNEST_TLS_KEY_PATH:-}
+      POSTNEST_SECURITY_ALLOW_INSECURE_AUTH: ${POSTNEST_SECURITY_ALLOW_INSECURE_AUTH:-true}
     ports:
       - "8080:8080"
       - "143:143"
@@ -48,6 +49,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ${POSTNEST_TLS_CERT_PATH:-/dev/null}:/etc/postnest/tls.crt:ro
       - ${POSTNEST_TLS_KEY_PATH:-/dev/null}:/etc/postnest/tls.key:ro

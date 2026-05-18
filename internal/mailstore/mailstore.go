@@ -29,6 +29,12 @@ type SearchOptions struct {
 	Offset        int
 }
 
+// LabelCounts holds total and unread message counts for a label.
+type LabelCounts struct {
+	Total  int64
+	Unread int64
+}
+
 // MessagePatch contains optional fields for message updates.
 type MessagePatch struct {
 	IsRead      *bool
@@ -39,14 +45,17 @@ type MessagePatch struct {
 	IsOutbound  *bool
 	Subject     *string
 	HTMLBody    *string
-	PlainText   *string
-	ToAddresses []string
+	PlainText    *string
+	ToAddresses  []string
+	CcAddresses  []string
+	BccAddresses []string
 }
 
 // Store is the canonical interface for mail persistence.
 type Store interface {
 	CreateMessage(ctx context.Context, msg *models.Message, labelIDs []uuid.UUID, attachments []*models.Attachment) error
 	GetMessage(ctx context.Context, domainID, userID, messageID uuid.UUID) (*models.Message, error)
+	GetMessageSource(ctx context.Context, domainID, userID, messageID uuid.UUID) ([]byte, error)
 	ListMessages(ctx context.Context, domainID, userID uuid.UUID, labelID *uuid.UUID, opts ListOptions) ([]*models.Message, int64, error)
 	UpdateMessage(ctx context.Context, domainID, userID, messageID uuid.UUID, patch MessagePatch) error
 	DeleteMessage(ctx context.Context, domainID, userID, messageID uuid.UUID) error
@@ -65,6 +74,8 @@ type Store interface {
 
 	CreateAttachments(ctx context.Context, attachments []*models.Attachment) error
 	GetAttachment(ctx context.Context, attachmentID uuid.UUID) (*models.Attachment, error)
+	ListMessageAttachments(ctx context.Context, messageID uuid.UUID) ([]*models.Attachment, error)
+	DeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error
 
 	SetFlag(ctx context.Context, messageID uuid.UUID, flag string) error
 	ClearFlag(ctx context.Context, messageID uuid.UUID, flag string) error
@@ -78,6 +89,7 @@ type Store interface {
 
 	CountUnreadByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error)
 	CountTotalByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error)
+	CountsByLabel(ctx context.Context, domainID, userID uuid.UUID) (map[uuid.UUID]LabelCounts, error)
 
 	CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error
 }

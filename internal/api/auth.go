@@ -11,13 +11,17 @@ import (
 
 // AuthHandler provides public authentication endpoints.
 type AuthHandler struct {
-	Auth       *auth.Service
-	SessionKey string
+	Auth          *auth.Service
+	SessionKey    string
+	SessionExpiry time.Duration
 }
 
 // NewAuthHandler creates an auth handler.
-func NewAuthHandler(authSvc *auth.Service, sessionKey string) *AuthHandler {
-	return &AuthHandler{Auth: authSvc, SessionKey: sessionKey}
+func NewAuthHandler(authSvc *auth.Service, sessionKey string, sessionExpiry time.Duration) *AuthHandler {
+	if sessionExpiry <= 0 {
+		sessionExpiry = 7 * 24 * time.Hour
+	}
+	return &AuthHandler{Auth: authSvc, SessionKey: sessionKey, SessionExpiry: sessionExpiry}
 }
 
 // RegisterRoutes mounts public auth routes.
@@ -58,22 +62,15 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		remoteIP = host
 	}
-	session, token, err := h.Auth.CreateSession(r.Context(), user.ID, remoteIP, r.UserAgent(), 7*24*time.Hour)
+	session, token, err := h.Auth.CreateSession(r.Context(), user.ID, remoteIP, r.UserAgent(), h.SessionExpiry)
 	if err != nil {
 		WriteError(w, ErrInternal)
 		return
 	}
 
 	secure := r.TLS != nil
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   86400 * 7,
-	})
+	SetSessionCookie(w, token, secure, h.SessionExpiry)
+	SetCSRFCookie(w, NewCSRFToken(), secure, h.SessionExpiry)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]any{
@@ -103,6 +100,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		MaxAge:   -1,
 	})
+	ClearCSRFCookie(w)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

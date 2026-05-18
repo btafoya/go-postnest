@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"context"
+	"io"
 	"net/http"
 	"net/mail"
 	"strconv"
@@ -26,14 +27,18 @@ type DomainLister interface {
 
 // Handler implements the webmail REST API.
 type Handler struct {
-	store mailstore.Store
-	auth  DomainLister
-	redis *redis.Client
+	store             mailstore.Store
+	auth              DomainLister
+	redis             *redis.Client
+	maxAttachmentSize int64
 }
 
 // NewHandler creates a webmail handler.
-func NewHandler(store mailstore.Store, authSvc DomainLister, redis *redis.Client) *Handler {
-	return &Handler{store: store, auth: authSvc, redis: redis}
+func NewHandler(store mailstore.Store, authSvc DomainLister, redis *redis.Client, maxAttachmentSize int64) *Handler {
+	if maxAttachmentSize <= 0 {
+		maxAttachmentSize = 25 << 20
+	}
+	return &Handler{store: store, auth: authSvc, redis: redis, maxAttachmentSize: maxAttachmentSize}
 }
 
 // RegisterRoutes mounts routes on a chi router.
@@ -55,6 +60,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/api/v1/drafts", h.createDraft)
 	r.Put("/api/v1/drafts/{id}", h.updateDraft)
 	r.Post("/api/v1/drafts/{id}/send", h.sendDraft)
+	r.Get("/api/v1/drafts/{id}/attachments", h.listAttachments)
+	r.Post("/api/v1/drafts/{id}/attachments", h.uploadAttachment)
+	r.Delete("/api/v1/drafts/{id}/attachments/{attID}", h.deleteAttachment)
 
 	r.Get("/api/v1/search", h.search)
 }
@@ -89,15 +97,25 @@ func (h *Handler) listLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type labelOut struct {
-		*models.Label
-		Total  int64 `json:"total"`
-		Unread int64 `json:"unread"`
+		ID       uuid.UUID `json:"id"`
+		Name     string    `json:"name"`
+		Color    string    `json:"color"`
+		IsSystem bool       `json:"is_system"`
+		Total    int64     `json:"total"`
+		Unread   int64     `json:"unread"`
+	}
+	counts, err := h.store.CountsByLabel(r.Context(), did, u.ID)
+	if err != nil {
+		api.WriteError(w, err)
+		return
 	}
 	out := make([]labelOut, 0, len(labels))
 	for _, l := range labels {
-		lo := labelOut{Label: l}
-		lo.Total, _ = h.store.CountTotalByLabel(r.Context(), did, u.ID, l.ID)
-		lo.Unread, _ = h.store.CountUnreadByLabel(r.Context(), did, u.ID, l.ID)
+		lo := labelOut{ID: l.ID, Name: l.Name, Color: l.Color, IsSystem: l.IsSystem}
+		if c, ok := counts[l.ID]; ok {
+			lo.Total = c.Total
+			lo.Unread = c.Unread
+		}
 		out = append(out, lo)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"labels": out})
@@ -184,7 +202,7 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "total": total})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": toMessageDTOs(msgs), "total": total})
 }
 
 func (h *Handler) getMessage(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +217,13 @@ func (h *Handler) getMessage(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, msg)
+	var labelNames []string
+	if lbls, lerr := h.store.GetMessageLabels(r.Context(), msg.ID); lerr == nil {
+		for _, l := range lbls {
+			labelNames = append(labelNames, l.Name)
+		}
+	}
+	writeJSON(w, http.StatusOK, toMessageDTO(msg, labelNames))
 }
 
 func (h *Handler) patchMessage(w http.ResponseWriter, r *http.Request) {
@@ -248,23 +272,45 @@ func (h *Handler) batchMessages(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+	switch req.Action {
+	case "mark_read", "mark_unread", "trash", "archive", "spam", "delete":
+	default:
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
 	u := h.currentUser(r)
 	did := h.domainID(r)
+	succeeded := make([]string, 0, len(req.MessageIDs))
+	type failure struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+	failed := make([]failure, 0)
 	for _, id := range req.MessageIDs {
+		var err error
 		switch req.Action {
 		case "mark_read":
 			tr := true
-			_ = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &tr})
+			err = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &tr})
 		case "mark_unread":
 			f := false
-			_ = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &f})
+			err = h.store.UpdateMessage(r.Context(), did, u.ID, id, mailstore.MessagePatch{IsRead: &f})
 		case "trash":
-			_ = h.store.MoveToMailbox(r.Context(), did, u.ID, id, "TRASH")
+			err = h.store.MoveToMailbox(r.Context(), did, u.ID, id, "TRASH")
+		case "archive":
+			err = h.store.MoveToMailbox(r.Context(), did, u.ID, id, "ARCHIVE")
+		case "spam":
+			err = h.store.MoveToMailbox(r.Context(), did, u.ID, id, "SPAM")
 		case "delete":
-			_ = h.store.DeleteMessage(r.Context(), did, u.ID, id)
+			err = h.store.DeleteMessage(r.Context(), did, u.ID, id)
+		}
+		if err != nil {
+			failed = append(failed, failure{ID: id.String(), Error: err.Error()})
+		} else {
+			succeeded = append(succeeded, id.String())
 		}
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]any{"succeeded": succeeded, "failed": failed})
 }
 
 func (h *Handler) applyLabels(w http.ResponseWriter, r *http.Request) {
@@ -300,13 +346,15 @@ func (h *Handler) getThread(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "messages": msgs})
+	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "messages": toMessageDTOs(msgs)})
 }
 
 func (h *Handler) createDraft(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Subject   string              `json:"subject"`
 		To        []map[string]string `json:"to"`
+		Cc        []map[string]string `json:"cc"`
+		Bcc       []map[string]string `json:"bcc"`
 		HTMLBody  string              `json:"html_body"`
 		PlainText string              `json:"plain_text"`
 	}
@@ -316,27 +364,26 @@ func (h *Handler) createDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	u := h.currentUser(r)
 	did := h.domainID(r)
-	var toAddrs []string
-	for _, t := range req.To {
-		if addr, ok := t["address"]; ok && addr != "" {
-			toAddrs = append(toAddrs, addr)
-		}
-	}
-	if err := validateEmailAddresses(toAddrs); err != nil {
+	toAddrs := extractAddresses(req.To)
+	ccAddrs := extractAddresses(req.Cc)
+	bccAddrs := extractAddresses(req.Bcc)
+	if err := validateEmailAddresses(append(append(append([]string{}, toAddrs...), ccAddrs...), bccAddrs...)); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
 	msg := &models.Message{
-		DomainID:    did,
-		UserID:      u.ID,
-		FromAddress: u.Email,
-		Subject:     req.Subject,
-		ToAddresses: toAddrs,
-		HTMLBody:    bluemonday.UGCPolicy().Sanitize(req.HTMLBody),
-		PlainText:   req.PlainText,
-		IsDraft:     true,
-		Mailbox:     "DRAFTS",
-		CreatedAt:   time.Now().UTC(),
+		DomainID:     did,
+		UserID:       u.ID,
+		FromAddress:  u.Email,
+		Subject:      req.Subject,
+		ToAddresses:  toAddrs,
+		CcAddresses:  ccAddrs,
+		BccAddresses: bccAddrs,
+		HTMLBody:     bluemonday.UGCPolicy().Sanitize(req.HTMLBody),
+		PlainText:    req.PlainText,
+		IsDraft:      true,
+		Mailbox:      "DRAFTS",
+		CreatedAt:    time.Now().UTC(),
 	}
 	if err := h.store.CreateMessage(r.Context(), msg, nil, nil); err != nil {
 		api.WriteError(w, err)
@@ -354,6 +401,8 @@ func (h *Handler) updateDraft(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Subject   string              `json:"subject"`
 		To        []map[string]string `json:"to"`
+		Cc        []map[string]string `json:"cc"`
+		Bcc       []map[string]string `json:"bcc"`
 		HTMLBody  string              `json:"html_body"`
 		PlainText string              `json:"plain_text"`
 	}
@@ -363,28 +412,38 @@ func (h *Handler) updateDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	u := h.currentUser(r)
 	did := h.domainID(r)
-	var toAddrs []string
-	for _, t := range req.To {
-		if addr, ok := t["address"]; ok && addr != "" {
-			toAddrs = append(toAddrs, addr)
-		}
-	}
-	if err := validateEmailAddresses(toAddrs); err != nil {
+	toAddrs := extractAddresses(req.To)
+	ccAddrs := extractAddresses(req.Cc)
+	bccAddrs := extractAddresses(req.Bcc)
+	if err := validateEmailAddresses(append(append(append([]string{}, toAddrs...), ccAddrs...), bccAddrs...)); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
 	sanitizedHTML := bluemonday.UGCPolicy().Sanitize(req.HTMLBody)
 	patch := mailstore.MessagePatch{
-		Subject:     &req.Subject,
-		HTMLBody:    &sanitizedHTML,
-		PlainText:   &req.PlainText,
-		ToAddresses: toAddrs,
+		Subject:      &req.Subject,
+		HTMLBody:     &sanitizedHTML,
+		PlainText:    &req.PlainText,
+		ToAddresses:  toAddrs,
+		CcAddresses:  ccAddrs,
+		BccAddresses: bccAddrs,
 	}
 	if err := h.store.UpdateMessage(r.Context(), did, u.ID, id, patch); err != nil {
 		api.WriteError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// extractAddresses pulls non-empty "address" values from a recipient list.
+func extractAddresses(list []map[string]string) []string {
+	var out []string
+	for _, t := range list {
+		if addr, ok := t["address"]; ok && addr != "" {
+			out = append(out, addr)
+		}
+	}
+	return out
 }
 
 // validateEmailAddresses checks that all strings are valid RFC 5322 addresses.
@@ -436,6 +495,116 @@ func (h *Handler) sendDraft(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued"})
 }
 
+func (h *Handler) listAttachments(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	if _, err := h.store.GetMessage(r.Context(), h.domainID(r), u.ID, id); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	atts, err := h.store.ListMessageAttachments(r.Context(), id)
+	if err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	type attOut struct {
+		ID       uuid.UUID `json:"id"`
+		Filename string    `json:"filename"`
+		Size     int       `json:"size"`
+		Type     string    `json:"content_type"`
+	}
+	out := make([]attOut, 0, len(atts))
+	for _, a := range atts {
+		out = append(out, attOut{ID: a.ID, Filename: a.Filename, Size: a.SizeBytes, Type: a.ContentType})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attachments": out})
+}
+
+func (h *Handler) uploadAttachment(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	msg, err := h.store.GetMessage(r.Context(), h.domainID(r), u.ID, id)
+	if err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	if !msg.IsDraft {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if err := r.ParseMultipartForm(h.maxAttachmentSize + (1 << 20)); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	defer file.Close()
+	if header.Size > h.maxAttachmentSize {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "file", Issue: "too_large"}}))
+		return
+	}
+	data := make([]byte, header.Size)
+	if _, err := io.ReadFull(file, data); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	ct := header.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	att := &models.Attachment{
+		MessageID:   id,
+		Filename:    header.Filename,
+		ContentType: ct,
+		SizeBytes:   int(header.Size),
+		Data:        data,
+	}
+	if err := h.store.CreateAttachments(r.Context(), []*models.Attachment{att}); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": att.ID, "filename": att.Filename, "size": att.SizeBytes})
+}
+
+func (h *Handler) deleteAttachment(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	attID, err := uuid.Parse(chi.URLParam(r, "attID"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	if _, err := h.store.GetMessage(r.Context(), h.domainID(r), u.ID, id); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	att, err := h.store.GetAttachment(r.Context(), attID)
+	if err != nil || att.MessageID != id {
+		api.WriteError(w, api.ErrNotFound)
+		return
+	}
+	if err := h.store.DeleteAttachment(r.Context(), attID); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	u := h.currentUser(r)
@@ -444,7 +613,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": msgs, "total": total})
+	writeJSON(w, http.StatusOK, map[string]any{"results": toMessageDTOs(msgs), "total": total})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

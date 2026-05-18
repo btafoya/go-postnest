@@ -113,6 +113,16 @@ func (m *mockStore) CountUnreadByLabel(ctx context.Context, domainID, userID uui
 func (m *mockStore) CountTotalByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error) {
 	return int64(len(m.messages)), nil
 }
+func (m *mockStore) CountsByLabel(ctx context.Context, domainID, userID uuid.UUID) (map[uuid.UUID]mailstore.LabelCounts, error) {
+	return map[uuid.UUID]mailstore.LabelCounts{}, nil
+}
+func (m *mockStore) GetMessageSource(ctx context.Context, domainID, userID, messageID uuid.UUID) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockStore) ListMessageAttachments(ctx context.Context, messageID uuid.UUID) ([]*models.Attachment, error) {
+	return nil, nil
+}
+func (m *mockStore) DeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error { return nil }
 func (m *mockStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error { return nil }
 
 // mockAuth implements just enough for domain context.
@@ -124,7 +134,7 @@ func (a *mockAuth) GetUserDomains(ctx context.Context, userID uuid.UUID) ([]*mod
 
 func newTestHandler() (*Handler, *mockStore) {
 	store := &mockStore{}
-	return NewHandler(store, &mockAuth{}, nil), store
+	return NewHandler(store, &mockAuth{}, nil, 25<<20), store
 }
 
 
@@ -162,6 +172,53 @@ func TestCreateDraft(t *testing.T) {
 	}
 	if !msg.IsDraft {
 		t.Error("expected IsDraft=true")
+	}
+}
+
+func TestBatchMessages_ReportsResults(t *testing.T) {
+	h, store := newTestHandler()
+	id1 := uuid.Must(uuid.NewV7())
+	store.messages = append(store.messages, &models.Message{ID: id1, IsRead: false})
+
+	body, _ := json.Marshal(map[string]any{
+		"action":      "mark_read",
+		"message_ids": []string{id1.String()},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/messages/batch", bytes.NewReader(body))
+	req = req.WithContext(api.WithUser(req.Context(), &models.User{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001")}))
+	rr := httptest.NewRecorder()
+	h.batchMessages(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Succeeded []string `json:"succeeded"`
+		Failed    []struct {
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Succeeded) != 1 || len(resp.Failed) != 0 {
+		t.Fatalf("succeeded=%v failed=%v", resp.Succeeded, resp.Failed)
+	}
+}
+
+func TestBatchMessages_UnknownActionRejected(t *testing.T) {
+	h, _ := newTestHandler()
+	body, _ := json.Marshal(map[string]any{
+		"action":      "explode",
+		"message_ids": []string{uuid.Must(uuid.NewV7()).String()},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/messages/batch", bytes.NewReader(body))
+	req = req.WithContext(api.WithUser(req.Context(), &models.User{ID: uuid.New()}))
+	rr := httptest.NewRecorder()
+	h.batchMessages(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 }
 

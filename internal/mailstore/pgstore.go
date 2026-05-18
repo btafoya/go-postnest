@@ -35,11 +35,15 @@ func (s *PGStore) CreateMessage(ctx context.Context, msg *models.Message, labelI
 		msg.CreatedAt = time.Now().UTC()
 	}
 	msg.UpdatedAt = msg.CreatedAt
+	// Drafts have no RFC822 source until sent; the column is NOT NULL.
+	if msg.Source == nil {
+		msg.Source = []byte{}
+	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO messages (
 			id, domain_id, user_id, thread_id, postmark_message_id, mailbox,
-			message_id_header, in_reply_to, references, subject,
+			message_id_header, in_reply_to, "references", subject,
 			from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to,
 			date, plain_text, html_body, source, size_bytes,
 			is_draft, is_outbound, is_read, is_flagged, is_answered, created_at, updated_at
@@ -82,7 +86,7 @@ func (s *PGStore) CreateMessage(ctx context.Context, msg *models.Message, labelI
 func (s *PGStore) GetMessage(ctx context.Context, domainID, userID, messageID uuid.UUID) (*models.Message, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT id, domain_id, user_id, thread_id, postmark_message_id, mailbox,
-			message_id_header, in_reply_to, references, subject,
+			message_id_header, in_reply_to, "references", subject,
 			from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to,
 			date, plain_text, html_body, source, size_bytes,
 			is_draft, is_outbound, is_read, is_flagged, is_answered, created_at, updated_at
@@ -106,6 +110,21 @@ func (s *PGStore) GetMessage(ctx context.Context, domainID, userID, messageID uu
 	}
 	m.ThreadID = threadID
 	return &m, nil
+}
+
+// GetMessageSource returns the raw RFC822 source bytes for a message.
+func (s *PGStore) GetMessageSource(ctx context.Context, domainID, userID, messageID uuid.UUID) ([]byte, error) {
+	var src []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT source FROM messages WHERE id=$1 AND domain_id=$2 AND user_id=$3
+	`, messageID, domainID, userID).Scan(&src)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return src, nil
 }
 
 func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, labelID *uuid.UUID, opts ListOptions) ([]*models.Message, int64, error) {
@@ -149,9 +168,9 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 
 	query := `
 		SELECT m.id, m.domain_id, m.user_id, m.thread_id, m.postmark_message_id, m.mailbox,
-			m.message_id_header, m.in_reply_to, m.references, m.subject,
+			m.message_id_header, m.in_reply_to, m."references", m.subject,
 			m.from_address, m.from_name, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to,
-			m.date, m.plain_text, m.html_body, m.source, m.size_bytes,
+			m.date, m.plain_text, m.html_body, m.size_bytes,
 			m.is_draft, m.is_outbound, m.is_read, m.is_flagged, m.is_answered, m.created_at, m.updated_at
 		FROM messages m
 		JOIN message_labels ml ON ml.message_id = m.id
@@ -174,7 +193,7 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 			&m.ID, &m.DomainID, &m.UserID, &threadID, &m.PostmarkMessageID, &m.Mailbox,
 			&m.MessageIDHeader, &m.InReplyTo, &m.References, &m.Subject,
 			&m.FromAddress, &m.FromName, &m.ToAddresses, &m.CcAddresses, &m.BccAddresses, &m.ReplyTo,
-			&m.Date, &m.PlainText, &m.HTMLBody, &m.Source, &m.SizeBytes,
+			&m.Date, &m.PlainText, &m.HTMLBody, &m.SizeBytes,
 			&m.IsDraft, &m.IsOutbound, &m.IsRead, &m.IsFlagged, &m.IsAnswered, &m.CreatedAt, &m.UpdatedAt,
 		); err != nil {
 			return nil, 0, err
@@ -198,9 +217,11 @@ func (s *PGStore) UpdateMessage(ctx context.Context, domainID, userID, messageID
 			html_body = coalesce($11, html_body),
 			plain_text = coalesce($12, plain_text),
 			to_addresses = coalesce($13, to_addresses),
+			cc_addresses = coalesce($14, cc_addresses),
+			bcc_addresses = coalesce($15, bcc_addresses),
 			updated_at = now()
 		WHERE id=$1 AND domain_id=$2 AND user_id=$3
-	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox, patch.IsOutbound, patch.Subject, patch.HTMLBody, patch.PlainText, patch.ToAddresses)
+	`, messageID, domainID, userID, patch.IsRead, patch.IsFlagged, patch.IsAnswered, patch.IsDraft, patch.Mailbox, patch.IsOutbound, patch.Subject, patch.HTMLBody, patch.PlainText, patch.ToAddresses, patch.CcAddresses, patch.BccAddresses)
 	return err
 }
 
@@ -335,14 +356,13 @@ func (s *PGStore) GetThread(ctx context.Context, domainID, userID, threadID uuid
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT m.id, m.domain_id, m.user_id, m.thread_id, m.postmark_message_id, m.mailbox,
-			m.message_id_header, m.in_reply_to, m.references, m.subject,
+			m.message_id_header, m.in_reply_to, m."references", m.subject,
 			m.from_address, m.from_name, m.to_addresses, m.cc_addresses, m.bcc_addresses, m.reply_to,
-			m.date, m.plain_text, m.html_body, m.source, m.size_bytes,
+			m.date, m.plain_text, m.html_body, m.size_bytes,
 			m.is_draft, m.is_outbound, m.is_read, m.is_flagged, m.is_answered, m.created_at, m.updated_at
 		FROM messages m
 		WHERE m.domain_id=$1 AND m.user_id=$2 AND m.thread_id=$3
-		ORDER BY m.date DESC
-		LIMIT 1000
+		ORDER BY m.date ASC
 	`, domainID, userID, threadID)
 	if err != nil {
 		return nil, nil, err
@@ -356,7 +376,7 @@ func (s *PGStore) GetThread(ctx context.Context, domainID, userID, threadID uuid
 			&m.ID, &m.DomainID, &m.UserID, &tid, &m.PostmarkMessageID, &m.Mailbox,
 			&m.MessageIDHeader, &m.InReplyTo, &m.References, &m.Subject,
 			&m.FromAddress, &m.FromName, &m.ToAddresses, &m.CcAddresses, &m.BccAddresses, &m.ReplyTo,
-			&m.Date, &m.PlainText, &m.HTMLBody, &m.Source, &m.SizeBytes,
+			&m.Date, &m.PlainText, &m.HTMLBody, &m.SizeBytes,
 			&m.IsDraft, &m.IsOutbound, &m.IsRead, &m.IsFlagged, &m.IsAnswered, &m.CreatedAt, &m.UpdatedAt,
 		); err != nil {
 			return nil, nil, err
@@ -462,6 +482,31 @@ func (s *PGStore) GetAttachment(ctx context.Context, attachmentID uuid.UUID) (*m
 	return &a, nil
 }
 
+func (s *PGStore) ListMessageAttachments(ctx context.Context, messageID uuid.UUID) ([]*models.Attachment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, message_id, filename, content_type, size_bytes, data, content_id, created_at
+		FROM attachments WHERE message_id=$1 ORDER BY created_at ASC
+	`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.Attachment
+	for rows.Next() {
+		var a models.Attachment
+		if err := rows.Scan(&a.ID, &a.MessageID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.Data, &a.ContentID, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+func (s *PGStore) DeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM attachments WHERE id=$1`, attachmentID)
+	return err
+}
+
 func (s *PGStore) SetFlag(ctx context.Context, messageID uuid.UUID, flag string) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO message_flags (message_id, flag) VALUES ($1,$2) ON CONFLICT DO NOTHING
@@ -532,9 +577,9 @@ func (s *PGStore) Search(ctx context.Context, domainID, userID uuid.UUID, query 
 
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, domain_id, user_id, thread_id, postmark_message_id, mailbox,
-			message_id_header, in_reply_to, references, subject,
+			message_id_header, in_reply_to, "references", subject,
 			from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to,
-			date, plain_text, html_body, source, size_bytes,
+			date, plain_text, html_body, size_bytes,
 			is_draft, is_outbound, is_read, is_flagged, is_answered, created_at, updated_at
 		FROM messages
 		WHERE domain_id=$1 AND user_id=$2 AND search_vector @@ plainto_tsquery('english',$3)
@@ -554,7 +599,7 @@ func (s *PGStore) Search(ctx context.Context, domainID, userID uuid.UUID, query 
 			&m.ID, &m.DomainID, &m.UserID, &threadID, &m.PostmarkMessageID, &m.Mailbox,
 			&m.MessageIDHeader, &m.InReplyTo, &m.References, &m.Subject,
 			&m.FromAddress, &m.FromName, &m.ToAddresses, &m.CcAddresses, &m.BccAddresses, &m.ReplyTo,
-			&m.Date, &m.PlainText, &m.HTMLBody, &m.Source, &m.SizeBytes,
+			&m.Date, &m.PlainText, &m.HTMLBody, &m.SizeBytes,
 			&m.IsDraft, &m.IsOutbound, &m.IsRead, &m.IsFlagged, &m.IsAnswered, &m.CreatedAt, &m.UpdatedAt,
 		); err != nil {
 			return nil, 0, err
@@ -597,6 +642,33 @@ func (s *PGStore) CountTotalByLabel(ctx context.Context, domainID, userID uuid.U
 		WHERE m.domain_id=$1 AND m.user_id=$2 AND ml.label_id=$3
 	`, domainID, userID, labelID).Scan(&count)
 	return count, err
+}
+
+// CountsByLabel returns total and unread counts for every label in one query.
+func (s *PGStore) CountsByLabel(ctx context.Context, domainID, userID uuid.UUID) (map[uuid.UUID]LabelCounts, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT ml.label_id,
+			count(*) AS total,
+			count(*) FILTER (WHERE m.is_read = false) AS unread
+		FROM message_labels ml
+		JOIN messages m ON m.id = ml.message_id
+		WHERE m.domain_id=$1 AND m.user_id=$2
+		GROUP BY ml.label_id
+	`, domainID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[uuid.UUID]LabelCounts)
+	for rows.Next() {
+		var id uuid.UUID
+		var c LabelCounts
+		if err := rows.Scan(&id, &c.Total, &c.Unread); err != nil {
+			return nil, err
+		}
+		out[id] = c
+	}
+	return out, rows.Err()
 }
 
 func (s *PGStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error {

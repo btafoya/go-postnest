@@ -108,7 +108,7 @@ func TestRecovery_RecoversPanic(t *testing.T) {
 
 func TestSetSessionCookie(t *testing.T) {
 	rr := httptest.NewRecorder()
-	SetSessionCookie(rr, "token123", true)
+	SetSessionCookie(rr, "token123", true, 7*24*time.Hour)
 
 	cookies := rr.Result().Cookies()
 	if len(cookies) != 1 {

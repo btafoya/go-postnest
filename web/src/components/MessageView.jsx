@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import DOMPurify from 'dompurify'
 import { ArrowLeft, Reply, ReplyAll, Forward, Trash2, Archive, AlertCircle, Star, Paperclip, Printer, MoreVertical } from 'lucide-react'
 import { getMessage, patchMessage, deleteMessage } from '../api'
 
@@ -108,9 +109,18 @@ export default function MessageView() {
 
       {/* Message body */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
-        <div className="prose max-w-none text-surface-800 whitespace-pre-wrap">
-          {message.body || message.snippet || 'No content'}
-        </div>
+        {message.html_body ? (
+          <iframe
+            title="message-body"
+            sandbox=""
+            className="w-full h-full min-h-[400px] border-0"
+            srcDoc={DOMPurify.sanitize(message.html_body)}
+          />
+        ) : (
+          <div className="prose max-w-none text-surface-800 whitespace-pre-wrap">
+            {message.plain_text || message.snippet || 'No content'}
+          </div>
+        )}
       </div>
     </div>
   )

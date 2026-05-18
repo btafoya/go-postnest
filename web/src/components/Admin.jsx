@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import { Shield, Users, Globe, Activity, AlertTriangle } from 'lucide-react'
-import { getDomains } from '../api'
+import { getDomains, getHealth } from '../api'
 
 export default function Admin() {
   const [domains, setDomains] = useState([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('overview')
+  const [health, setHealth] = useState(null)
 
   useEffect(() => {
     setLoading(true)
@@ -13,6 +14,18 @@ export default function Admin() {
       .then((data) => setDomains(data))
       .catch(console.error)
       .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const poll = () => {
+      getHealth()
+        .then((h) => { if (active) setHealth(h) })
+        .catch(() => { if (active) setHealth(null) })
+    }
+    poll()
+    const t = setInterval(poll, 15000)
+    return () => { active = false; clearInterval(t) }
   }, [])
 
   const tabs = [
@@ -69,28 +82,36 @@ export default function Admin() {
 
             <div className="card p-4">
               <h3 className="text-sm font-medium text-surface-900 mb-3">System Status</h3>
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                  <span className="text-sm text-surface-700">HTTP Server: Running</span>
+              {!health ? (
+                <p className="text-sm text-surface-500">Loading status…</p>
+              ) : (
+                <div className="space-y-2">
+                  {[
+                    ['Database', health.database],
+                    ['Redis', health.redis],
+                    ['IMAP Server', health.imap],
+                    ['SMTP Server', health.smtp],
+                  ].map(([label, c]) => {
+                    const up = c?.status === 'up'
+                    return (
+                      <div key={label} className="flex items-center gap-2">
+                        <div className={`h-2 w-2 rounded-full ${up ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                        <span className="text-sm text-surface-700">
+                          {label}: {up ? 'Running' : 'Down'}
+                          {up && c.latency_ms != null ? ` (${c.latency_ms}ms)` : ''}
+                          {!up && c?.error ? ` — ${c.error}` : ''}
+                        </span>
+                      </div>
+                    )
+                  })}
+                  <div className="flex items-center gap-2">
+                    <div className="h-2 w-2 rounded-full bg-surface-400"></div>
+                    <span className="text-sm text-surface-700">
+                      Worker queue: {health.worker_queue?.depth ?? 0} pending, {health.worker_queue?.dead ?? 0} dead
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                  <span className="text-sm text-surface-700">IMAP Server: Running</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                  <span className="text-sm text-surface-700">SMTP Server: Running</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                  <span className="text-sm text-surface-700">Redis: Connected</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                  <span className="text-sm text-surface-700">PostgreSQL: Connected</span>
-                </div>
-              </div>
+              )}
             </div>
           </div>
         )}

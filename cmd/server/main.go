@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/go-postnest/postnest/internal/calendar"
 	"github.com/go-postnest/postnest/internal/certmanager"
 	"github.com/go-postnest/postnest/internal/config"
 	"github.com/go-postnest/postnest/internal/contacts"
@@ -52,10 +54,11 @@ func main() {
 	authService := auth.NewService(pgPool.Pool, cfg.Argon2idTime, cfg.Argon2idMemory, cfg.Argon2idThreads, cfg.SessionKey)
 	mailStore := mailstore.NewPGStore(pgPool.Pool)
 	contactsStore := contacts.NewPGStore(pgPool.Pool)
+	calendarStore := calendar.NewPGStore(pgPool.Pool)
 	postmarkClient := postmark.NewClient()
 	_ = postmarkClient
 
-	webmailHandler := webmail.NewHandler(mailStore, authService, redisClient)
+	webmailHandler := webmail.NewHandler(mailStore, authService, redisClient, cfg.MaxAttachmentSize)
 	webhookHandler := webhook.NewHandler(redisClient, cfg.PostmarkWebhookSecret)
 
 	r := chi.NewRouter()
@@ -93,18 +96,25 @@ func main() {
 	webhookHandler.RegisterRoutes(r)
 
 	// Public auth routes
-	authHandler := api.NewAuthHandler(authService, cfg.SessionKey)
+	authHandler := api.NewAuthHandler(authService, cfg.SessionKey, cfg.SessionExpiry)
 	authHandler.RegisterRoutes(r)
+
+	// Listener addresses resolved by the TLS strategy below; declared early so
+	// the health endpoint closure can probe them.
+	var imapAddr, smtpAddr string
 
 	// Authenticated API routes
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireSession(authService))
+		r.Use(api.CSRF)
 		webmailHandler.RegisterRoutes(r)
+		calendar.NewHandler(calendarStore, authService).RegisterRoutes(r)
 	})
 
 	// Admin API routes
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireSession(authService))
+		r.Use(api.CSRF)
 		r.Use(api.RequireDomainAdmin(authService))
 		r.Get("/admin/api/v1/domains", func(w http.ResponseWriter, r *http.Request) {
 			user := api.UserFromContext(r.Context())
@@ -114,6 +124,34 @@ func main() {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"domains": doms})
+		})
+		r.Get("/admin/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			comp := func(probe func() error) map[string]any {
+				start := time.Now()
+				if err := probe(); err != nil {
+					return map[string]any{"status": "down", "error": err.Error()}
+				}
+				return map[string]any{"status": "up", "latency_ms": time.Since(start).Milliseconds()}
+			}
+			dialTCP := func(addr string) func() error {
+				return func() error {
+					c, err := net.DialTimeout("tcp", addr, 2*time.Second)
+					if err != nil {
+						return err
+					}
+					return c.Close()
+				}
+			}
+			depth, _ := redisClient.UniversalClient.LLen(ctx, "queue:jobs").Result()
+			dead, _ := redisClient.UniversalClient.LLen(ctx, "queue:jobs:dead").Result()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"database":     comp(func() error { return pgPool.Ping(ctx) }),
+				"redis":        comp(func() error { return redisClient.Ping(ctx).Err() }),
+				"imap":         comp(dialTCP(imapAddr)),
+				"smtp":         comp(dialTCP(smtpAddr)),
+				"worker_queue": map[string]any{"depth": depth, "dead": dead},
+			})
 		})
 	})
 
@@ -135,8 +173,6 @@ func main() {
 	var (
 		tlsConfig         *tls.Config
 		allowInsecureAuth bool
-		imapAddr          string
-		smtpAddr          string
 		certMgr           *certmanager.Manager
 	)
 
@@ -189,11 +225,11 @@ func main() {
 		allowInsecureAuth = cfg.AllowInsecureAuth
 		imapAddr = cfg.IMAPAddr
 		smtpAddr = cfg.SMTPAddr
-		if allowInsecureAuth {
-			log.Warn("running without TLS with insecure auth allowed", "imap", imapAddr, "smtp", smtpAddr)
-		} else {
-			log.Info("running without TLS but insecure auth disabled", "imap", imapAddr, "smtp", smtpAddr)
+		if !allowInsecureAuth {
+			log.Error("refusing to start: no TLS configured and plaintext auth not explicitly allowed; set POSTNEST_ALLOW_INSECURE_AUTH=true to override (development only)")
+			os.Exit(1)
 		}
+		log.Warn("running without TLS with insecure auth allowed", "imap", imapAddr, "smtp", smtpAddr)
 	}
 
 	// IMAP server
@@ -217,7 +253,7 @@ func main() {
 	}()
 
 	// DAV routes
-	davHandler := dav.NewHandler(authService, contactsStore, mailStore)
+	davHandler := dav.NewHandler(authService, contactsStore, mailStore, calendarStore)
 	davHandler.RegisterRoutes(r)
 
 	// Graceful shutdown
