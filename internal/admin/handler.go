@@ -4,13 +4,18 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -77,7 +82,7 @@ func (h *Handler) listDomains(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	doms, err := h.store.ListDomains(ctx)
 	if err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "Domain"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"domains": toDomainDTOs(doms)})
@@ -97,12 +102,12 @@ func (h *Handler) createDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Name == "" {
-		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "name", Issue: "required"}}))
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "name is required", StatusCode: http.StatusBadRequest})
 		return
 	}
 	d, err := h.store.CreateDomain(ctx, req.Name, req.PostmarkToken, req.PostmarkStream)
 	if err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "Domain"))
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"domain": toDomainDTOFromModel(d)})
@@ -128,11 +133,11 @@ func (h *Handler) updateDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Name == "" {
-		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "name", Issue: "required"}}))
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "name is required", StatusCode: http.StatusBadRequest})
 		return
 	}
 	if err := h.store.UpdateDomain(ctx, id, req.Name, req.PostmarkToken, req.PostmarkStream, req.IsActive); err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "Domain"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"domain": domainDTO{ID: id, Name: req.Name, PostmarkToken: req.PostmarkToken, PostmarkStream: req.PostmarkStream, IsActive: req.IsActive}})
@@ -146,7 +151,7 @@ func (h *Handler) deleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.DeleteDomain(ctx, id); err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "Domain"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
@@ -165,7 +170,7 @@ func (h *Handler) toggleDomainActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.ToggleDomainActive(ctx, id, body.IsActive); err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "Domain"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"is_active": body.IsActive})
@@ -177,7 +182,7 @@ func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	users, err := h.store.ListUsers(ctx, limit, offset)
 	if err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": toUserDTOs(users)})
@@ -197,8 +202,16 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if req.Email == "" || req.Password == "" {
-		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "email", Issue: "required"}, {Field: "password", Issue: "required"}}))
+	if req.Email == "" {
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "email is required", StatusCode: http.StatusBadRequest})
+		return
+	}
+	if req.Password == "" {
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "password is required", StatusCode: http.StatusBadRequest})
+		return
+	}
+	if !strings.Contains(req.Email, "@") {
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "email is invalid", StatusCode: http.StatusBadRequest})
 		return
 	}
 	hash, err := h.hasher.hashPassword(req.Password)
@@ -208,7 +221,7 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := h.store.CreateUser(ctx, req.Email, hash, req.DisplayName, req.IsSuperAdmin)
 	if err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserDTO(u, nil)})
@@ -233,11 +246,11 @@ func (h *Handler) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Email == "" {
-		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "email", Issue: "required"}}))
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "email is required", StatusCode: http.StatusBadRequest})
 		return
 	}
 	if err := h.store.UpdateUser(ctx, id, req.Email, req.DisplayName, req.IsSuperAdmin); err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": userDTO{ID: id, Email: req.Email, DisplayName: req.DisplayName, IsSuperAdmin: req.IsSuperAdmin, Memberships: []membershipDTO{}}})
@@ -251,7 +264,7 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.DeleteUser(ctx, id); err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
@@ -270,7 +283,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Password == "" {
-		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "password", Issue: "required"}}))
+		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "password is required", StatusCode: http.StatusBadRequest})
 		return
 	}
 	hash, err := h.hasher.hashPassword(body.Password)
@@ -279,7 +292,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.ResetPassword(ctx, id, hash); err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
@@ -289,7 +302,7 @@ func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	settings, err := h.store.GetSettings(ctx)
 	if err != nil {
-		api.WriteError(w, api.ErrInternal)
+		api.WriteError(w, mapStoreError(err, "Settings"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
@@ -304,11 +317,32 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	for k, v := range body {
 		if err := h.store.SetSetting(ctx, k, v); err != nil {
-			api.WriteError(w, api.ErrInternal)
+			api.WriteError(w, mapStoreError(err, "Settings"))
 			return
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+}
+
+func mapStoreError(err error, resource string) *api.AppError {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case pgerrcode.UniqueViolation:
+			return &api.AppError{
+				Code:       "conflict",
+				Message:    resource + " already exists",
+				StatusCode: http.StatusConflict,
+			}
+		}
+	}
+	if errors.Is(err, ErrNotFound) || errors.Is(err, pgx.ErrNoRows) {
+		return &api.AppError{Code: "not_found", Message: "Not found", StatusCode: http.StatusNotFound}
+	}
+	return api.ErrInternal
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
