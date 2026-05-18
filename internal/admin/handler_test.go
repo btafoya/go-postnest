@@ -39,11 +39,11 @@ type mockStore struct {
 	lastCreateUserHash string
 }
 
-func (m *mockStore) ListDomains(ctx context.Context) ([]*DomainRow, error) {
+func (m *mockStore) ListDomains(ctx context.Context, limit, offset int) ([]*DomainRow, int64, error) {
 	if m.listDomainsErr != nil {
-		return nil, m.listDomainsErr
+		return nil, 0, m.listDomainsErr
 	}
-	return m.domains, nil
+	return m.domains, int64(len(m.domains)), nil
 }
 
 func (m *mockStore) CreateDomain(ctx context.Context, name, token, stream string) (*models.Domain, error) {
@@ -76,11 +76,11 @@ func (m *mockStore) ToggleDomainActive(ctx context.Context, id uuid.UUID, isActi
 	return nil
 }
 
-func (m *mockStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow, error) {
+func (m *mockStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow, int64, error) {
 	if m.listUsersErr != nil {
-		return nil, m.listUsersErr
+		return nil, 0, m.listUsersErr
 	}
-	return m.users, nil
+	return m.users, int64(len(m.users)), nil
 }
 
 func (m *mockStore) CreateUser(ctx context.Context, email, passwordHash, displayName string, isSuperAdmin bool) (*models.User, error) {
@@ -735,6 +735,115 @@ func TestResetPassword_StrongPassword(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected detail with field=password issue=gte, got %v", details)
+	}
+}
+
+func TestListDomains_PaginationMeta(t *testing.T) {
+	store := &mockStore{
+		domains: []*DomainRow{
+			{Domain: models.Domain{ID: uuid.Must(uuid.NewV7()), Name: "example.com"}, IsActive: true, UserCount: 1},
+			{Domain: models.Domain{ID: uuid.Must(uuid.NewV7()), Name: "test.com"}, IsActive: false, UserCount: 2},
+		},
+	}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/domains", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["total"] != float64(2) {
+		t.Errorf("total = %v, want 2", resp["total"])
+	}
+	if resp["limit"] != float64(20) {
+		t.Errorf("limit = %v, want 20", resp["limit"])
+	}
+	if resp["offset"] != float64(0) {
+		t.Errorf("offset = %v, want 0", resp["offset"])
+	}
+}
+
+func TestListUsers_PaginationMeta(t *testing.T) {
+	store := &mockStore{
+		users: []*UserRow{
+			{User: models.User{ID: uuid.Must(uuid.NewV7()), Email: "alice@example.com"}},
+			{User: models.User{ID: uuid.Must(uuid.NewV7()), Email: "bob@example.com"}},
+		},
+	}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/users", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["total"] != float64(2) {
+		t.Errorf("total = %v, want 2", resp["total"])
+	}
+	if resp["limit"] != float64(20) {
+		t.Errorf("limit = %v, want 20", resp["limit"])
+	}
+	if resp["offset"] != float64(0) {
+		t.Errorf("offset = %v, want 0", resp["offset"])
+	}
+}
+
+func TestListUsers_Memberships(t *testing.T) {
+	store := &mockStore{
+		users: []*UserRow{
+			{
+				User: models.User{ID: uuid.Must(uuid.NewV7()), Email: "alice@example.com"},
+				Memberships: []*models.DomainMember{
+					{DomainID: uuid.Must(uuid.NewV7()), UserID: uuid.Must(uuid.NewV7()), Role: "admin"},
+				},
+			},
+		},
+	}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/users", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	users, ok := resp["users"].([]any)
+	if !ok || len(users) == 0 {
+		t.Fatal("expected users array")
+	}
+	first := users[0].(map[string]any)
+	memberships, ok := first["memberships"].([]any)
+	if !ok {
+		t.Fatal("expected memberships array")
+	}
+	if len(memberships) != 1 {
+		t.Errorf("memberships = %d, want 1", len(memberships))
 	}
 }
 

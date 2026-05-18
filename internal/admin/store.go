@@ -14,13 +14,13 @@ var ErrNotFound = fmt.Errorf("not found")
 
 // Store handles admin persistence.
 type Store interface {
-	ListDomains(ctx context.Context) ([]*DomainRow, error)
+	ListDomains(ctx context.Context, limit, offset int) ([]*DomainRow, int64, error)
 	CreateDomain(ctx context.Context, name, token, stream string) (*models.Domain, error)
 	UpdateDomain(ctx context.Context, id uuid.UUID, name, token, stream string, isActive bool) error
 	DeleteDomain(ctx context.Context, id uuid.UUID) error
 	ToggleDomainActive(ctx context.Context, id uuid.UUID, isActive bool) error
 
-	ListUsers(ctx context.Context, limit, offset int) ([]*UserRow, error)
+	ListUsers(ctx context.Context, limit, offset int) ([]*UserRow, int64, error)
 	CreateUser(ctx context.Context, email, passwordHash, displayName string, isSuperAdmin bool) (*models.User, error)
 	UpdateUser(ctx context.Context, id uuid.UUID, email, displayName string, isSuperAdmin bool) error
 	DeleteUser(ctx context.Context, id uuid.UUID) error
@@ -54,17 +54,21 @@ type UserRow struct {
 	Memberships []*models.DomainMember
 }
 
-// ListDomains returns all domains with user counts.
-func (s *PGStore) ListDomains(ctx context.Context) ([]*DomainRow, error) {
+// ListDomains returns paginated domains with user counts.
+func (s *PGStore) ListDomains(ctx context.Context, limit, offset int) ([]*DomainRow, int64, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.name, d.postmark_token, d.postmark_stream, d.is_active, d.created_at, d.updated_at,
 			COALESCE(m.cnt, 0)
 		FROM domains d
 		LEFT JOIN (SELECT domain_id, COUNT(*) AS cnt FROM domain_members GROUP BY domain_id) m ON m.domain_id = d.id
 		ORDER BY d.created_at DESC
-	`)
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -74,7 +78,7 @@ func (s *PGStore) ListDomains(ctx context.Context) ([]*DomainRow, error) {
 		var tok, stream *string
 		err := rows.Scan(&d.ID, &d.Name, &tok, &stream, &d.IsActive, &d.CreatedAt, &d.UpdatedAt, &d.UserCount)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if tok != nil {
 			d.PostmarkToken = *tok
@@ -84,7 +88,15 @@ func (s *PGStore) ListDomains(ctx context.Context) ([]*DomainRow, error) {
 		}
 		out = append(out, &d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	var total int64
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM domains`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 // CreateDomain inserts a new domain.
@@ -144,43 +156,76 @@ func (s *PGStore) ToggleDomainActive(ctx context.Context, id uuid.UUID, isActive
 }
 
 // ListUsers returns paginated users with memberships.
-func (s *PGStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow, error) {
+func (s *PGStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow, int64, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, email, display_name, is_super_admin, created_at, updated_at
-		FROM users
-		ORDER BY created_at DESC
+		SELECT u.id, u.email, u.display_name, u.is_super_admin, u.created_at, u.updated_at,
+			dm.domain_id, dm.role, dm.created_at
+		FROM users u
+		LEFT JOIN domain_members dm ON dm.user_id = u.id
+		ORDER BY u.created_at DESC
 		LIMIT $1 OFFSET $2
 	`, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var out []*UserRow
+	userMap := make(map[uuid.UUID]*UserRow)
+	var order []uuid.UUID
 	for rows.Next() {
-		var u UserRow
-		err := rows.Scan(&u.ID, &u.Email, &u.DisplayName, &u.IsSuperAdmin, &u.CreatedAt, &u.UpdatedAt)
+		var uid uuid.UUID
+		var email, displayName string
+		var isSuperAdmin bool
+		var createdAt, updatedAt time.Time
+		var domainID *uuid.UUID
+		var role *string
+		var memCreatedAt *time.Time
+		err := rows.Scan(&uid, &email, &displayName, &isSuperAdmin, &createdAt, &updatedAt,
+			&domainID, &role, &memCreatedAt)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		out = append(out, &u)
+		u, exists := userMap[uid]
+		if !exists {
+			u = &UserRow{
+				User: models.User{
+					ID:           uid,
+					Email:        email,
+					DisplayName:  displayName,
+					IsSuperAdmin: isSuperAdmin,
+					CreatedAt:    createdAt,
+					UpdatedAt:    updatedAt,
+				},
+			}
+			userMap[uid] = u
+			order = append(order, uid)
+		}
+		if domainID != nil && role != nil {
+			u.Memberships = append(u.Memberships, &models.DomainMember{
+				DomainID:  *domainID,
+				UserID:    uid,
+				Role:      *role,
+				CreatedAt: *memCreatedAt,
+			})
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows.Close()
 
-	for _, u := range out {
-		mems, err := s.GetUserDomainMemberships(ctx, u.ID)
-		if err != nil {
-			return nil, err
-		}
-		u.Memberships = mems
+	out := make([]*UserRow, 0, len(order))
+	for _, uid := range order {
+		out = append(out, userMap[uid])
 	}
-	return out, nil
+
+	var total int64
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 // CreateUser inserts a user.

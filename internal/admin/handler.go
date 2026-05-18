@@ -29,6 +29,21 @@ func NewHandler(store Store, authSvc *auth.Service) *Handler {
 	}
 }
 
+func parsePagination(r *http.Request) (int, int) {
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+	limit, _ := strconv.Atoi(limitStr)
+	offset, _ := strconv.Atoi(offsetStr)
+	if limitStr == "" && offsetStr == "" {
+		limit = 20
+	} else {
+		if limitStr == "" {
+			limit = 20
+		}
+	}
+	return limit, offset
+}
+
 // RegisterRoutes wires admin routes.
 func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/admin/api/v1/domains", h.listDomains)
@@ -49,12 +64,18 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 func (h *Handler) listDomains(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	doms, err := h.store.ListDomains(ctx)
+	limit, offset := parsePagination(r)
+	doms, total, err := h.store.ListDomains(ctx, limit, offset)
 	if err != nil {
 		api.WriteError(w, mapStoreError(err, "Domain"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"domains": toDomainDTOs(doms)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"domains": toDomainDTOs(doms),
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+	})
 }
 
 type createDomainReq struct {
@@ -147,27 +168,22 @@ func (h *Handler) toggleDomainActive(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limitStr := r.URL.Query().Get("limit")
-	offsetStr := r.URL.Query().Get("offset")
-	limit, _ := strconv.Atoi(limitStr)
-	offset, _ := strconv.Atoi(offsetStr)
-	if limitStr == "" && offsetStr == "" {
-		limit = 20
-	} else {
-		if limitStr == "" {
-			limit = 20
-		}
-		if err := validate.Struct(listParams{Limit: limit, Offset: offset}); err != nil {
-			api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
-			return
-		}
+	limit, offset := parsePagination(r)
+	if err := validate.Struct(listParams{Limit: limit, Offset: offset}); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
+		return
 	}
-	users, err := h.store.ListUsers(ctx, limit, offset)
+	users, total, err := h.store.ListUsers(ctx, limit, offset)
 	if err != nil {
 		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": toUserDTOs(users)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"users":  toUserDTOs(users),
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 type createUserReq struct {
