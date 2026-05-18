@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
+	"github.com/go-postnest/postnest/internal/admin"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
 	"github.com/go-postnest/postnest/internal/calendar"
@@ -113,39 +113,15 @@ func main() {
 		contacts.NewHandler(contactsStore, authService).RegisterRoutes(r)
 	})
 
+	adminStore := admin.NewPGStore(pgPool.Pool)
+	adminHandler := admin.NewHandler(adminStore, authService)
+
 	// Admin API routes
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireSession(authService))
 		r.Use(api.CSRF)
 		r.Use(api.RequireDomainAdmin(authService))
-		r.Get("/admin/api/v1/domains", func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
-			doms, err := authService.ListDomains(ctx)
-			if err != nil {
-				api.WriteError(w, api.ErrInternal)
-				return
-			}
-			type dto struct {
-				ID        uuid.UUID `json:"id"`
-				Name      string    `json:"name"`
-				Status    string    `json:"status"`
-				UserCount int64     `json:"user_count"`
-				CreatedAt time.Time `json:"created_at"`
-			}
-			out := make([]dto, 0, len(doms))
-			for _, d := range doms {
-				var uc int64
-				_ = pgPool.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM domain_members WHERE domain_id=$1`, d.ID).Scan(&uc)
-				out = append(out, dto{
-					ID:        d.ID,
-					Name:      d.Name,
-					Status:    "Active",
-					UserCount: uc,
-					CreatedAt: d.CreatedAt,
-				})
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"domains": out})
-		})
+		adminHandler.RegisterRoutes(r)
 		r.Get("/admin/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 			comp := func(probe func() error) map[string]any {

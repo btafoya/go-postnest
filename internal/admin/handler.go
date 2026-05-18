@@ -1,8 +1,6 @@
 package admin
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,47 +13,19 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"golang.org/x/crypto/argon2"
 )
-
-// PasswordHasher creates password hashes.
-type PasswordHasher interface {
-	hashPassword(password string) (string, error)
-}
-
-type hasher struct {
-	time    uint32
-	memory  uint32
-	threads uint8
-}
-
-func newHasher(time, memory uint32, threads uint8) PasswordHasher {
-	return &hasher{time: time, memory: memory, threads: threads}
-}
-
-func (h *hasher) hashPassword(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	hash := argon2.IDKey([]byte(password), salt, h.time, h.memory, h.threads, 32)
-	encoded := base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(hash)
-	return encoded, nil
-}
 
 // Handler implements admin REST API.
 type Handler struct {
-	store  Store
-	auth   *auth.Service
-	hasher PasswordHasher
+	store Store
+	auth  *auth.Service
 }
 
 // NewHandler creates an admin handler.
-func NewHandler(store Store, authSvc *auth.Service, argonTime, argonMemory uint32, argonThreads uint8) *Handler {
+func NewHandler(store Store, authSvc *auth.Service) *Handler {
 	return &Handler{
-		store:  store,
-		auth:   authSvc,
-		hasher: newHasher(argonTime, argonMemory, argonThreads),
+		store: store,
+		auth:  authSvc,
 	}
 }
 
@@ -218,7 +188,12 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
 		return
 	}
-	hash, err := h.hasher.hashPassword(req.Password)
+	settings, _ := h.store.GetSettings(ctx)
+	if settings["require_strong_passwords"] == "true" && len(req.Password) < 8 {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "password", Issue: "gte", Param: "8"}}))
+		return
+	}
+	hash, err := h.auth.HashPassword(req.Password)
 	if err != nil {
 		api.WriteError(w, api.ErrInternal)
 		return
@@ -295,7 +270,12 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "password is required", StatusCode: http.StatusBadRequest})
 		return
 	}
-	hash, err := h.hasher.hashPassword(body.Password)
+	settings, _ := h.store.GetSettings(ctx)
+	if settings["require_strong_passwords"] == "true" && len(body.Password) < 8 {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "password", Issue: "gte", Param: "8"}}))
+		return
+	}
+	hash, err := h.auth.HashPassword(body.Password)
 	if err != nil {
 		api.WriteError(w, api.ErrInternal)
 		return

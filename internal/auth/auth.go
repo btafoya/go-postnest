@@ -46,6 +46,11 @@ func (s *Service) hashPassword(password string) (string, error) {
 	return encoded, nil
 }
 
+// HashPassword creates an Argon2id hash suitable for storage.
+func (s *Service) HashPassword(password string) (string, error) {
+	return s.hashPassword(password)
+}
+
 // verifyPassword checks a password against its hash.
 func (s *Service) verifyPassword(password, encodedHash string) bool {
 	parts := splitN(encodedHash, "$", 2)

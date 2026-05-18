@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,29 @@ func TestHashAndVerifyPassword(t *testing.T) {
 	}
 	if s.verifyPassword("wrong-password", hash) {
 		t.Error("verifyPassword should fail for wrong password")
+	}
+}
+
+func TestHashPassword(t *testing.T) {
+	s := NewService(nil, 1, 64*1024, 4, "test-session-key")
+
+	hash, err := s.HashPassword("secret")
+	if err != nil {
+		t.Fatalf("HashPassword failed: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("HashPassword returned empty string")
+	}
+	if !strings.Contains(hash, "$") {
+		t.Errorf("HashPassword returned %q, expected '$' separator", hash)
+	}
+
+	emptyHash, err := s.HashPassword("")
+	if err != nil {
+		t.Fatalf("HashPassword(\"\") failed: %v", err)
+	}
+	if emptyHash == "" {
+		t.Fatal("HashPassword(\"\") returned empty string")
 	}
 }
 

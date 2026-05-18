@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-postnest/postnest/internal/auth"
 	"github.com/go-postnest/postnest/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -20,21 +21,22 @@ import (
 
 // mockStore is an in-memory store for testing.
 type mockStore struct {
-	domains       []*DomainRow
-	users         []*UserRow
-	settings      map[string]string
-	listDomainsErr error
-	createDomainErr error
-	updateDomainErr error
-	deleteDomainErr error
-	toggleDomainErr error
-	listUsersErr    error
-	createUserErr   error
-	updateUserErr   error
-	deleteUserErr   error
-	resetPasswordErr error
-	getSettingsErr  error
-	setSettingErr   error
+	domains           []*DomainRow
+	users             []*UserRow
+	settings          map[string]string
+	listDomainsErr    error
+	createDomainErr   error
+	updateDomainErr   error
+	deleteDomainErr   error
+	toggleDomainErr   error
+	listUsersErr      error
+	createUserErr     error
+	updateUserErr     error
+	deleteUserErr     error
+	resetPasswordErr  error
+	getSettingsErr    error
+	setSettingErr     error
+	lastCreateUserHash string
 }
 
 func (m *mockStore) ListDomains(ctx context.Context) ([]*DomainRow, error) {
@@ -85,6 +87,7 @@ func (m *mockStore) CreateUser(ctx context.Context, email, passwordHash, display
 	if m.createUserErr != nil {
 		return nil, m.createUserErr
 	}
+	m.lastCreateUserHash = passwordHash
 	id := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
 	return &models.User{ID: id, Email: email, PasswordHash: passwordHash, DisplayName: displayName, IsSuperAdmin: isSuperAdmin, CreatedAt: now, UpdatedAt: now}, nil
@@ -134,7 +137,8 @@ func (m *mockStore) SetSetting(ctx context.Context, key, value string) error {
 }
 
 func newTestHandler(store Store) *Handler {
-	return NewHandler(store, nil, 1, 64*1024, 4)
+	authSvc := auth.NewService(nil, 1, 64*1024, 4, "test-session-key")
+	return NewHandler(store, authSvc)
 }
 
 func TestListDomains_ReturnsDTOs(t *testing.T) {
@@ -599,6 +603,138 @@ func TestCreateUser_Validation(t *testing.T) {
 				t.Errorf("expected detail with field=%q issue=%q, got %v", tt.wantField, tt.wantIssue, details)
 			}
 		})
+	}
+}
+
+func TestCreateUser_HashDelegation(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	body, _ := json.Marshal(map[string]any{"email": "a@b.com", "password": "secret123", "display_name": "Alice"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusCreated)
+	}
+	if store.lastCreateUserHash == "" {
+		t.Fatal("expected password hash to be passed to store")
+	}
+	if store.lastCreateUserHash == "secret123" {
+		t.Error("expected password hash to differ from raw password (delegation to auth.Service)")
+	}
+}
+
+func TestCreateUser_StrongPassword(t *testing.T) {
+	store := &mockStore{settings: map[string]string{"require_strong_passwords": "true"}}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	body, _ := json.Marshal(map[string]any{"email": "a@b.com", "password": "short"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected error object")
+	}
+	if errObj["code"] != "validation_failed" {
+		t.Errorf("code = %q, want validation_failed", errObj["code"])
+	}
+	details, ok := errObj["details"].([]any)
+	if !ok || len(details) == 0 {
+		t.Fatal("expected non-empty details array")
+	}
+	found := false
+	for _, d := range details {
+		fieldErr := d.(map[string]any)
+		if fieldErr["field"] == "password" && fieldErr["issue"] == "gte" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected detail with field=password issue=gte, got %v", details)
+	}
+}
+
+func TestCreateUser_WeakPasswordAllowed(t *testing.T) {
+	store := &mockStore{settings: map[string]string{"require_strong_passwords": "false"}}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	body, _ := json.Marshal(map[string]any{"email": "a@b.com", "password": "short"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusCreated)
+	}
+}
+
+func TestResetPassword_StrongPassword(t *testing.T) {
+	store := &mockStore{settings: map[string]string{"require_strong_passwords": "true"}}
+	h := newTestHandler(store)
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	id := uuid.Must(uuid.NewV7()).String()
+	body, _ := json.Marshal(map[string]any{"password": "short"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users/"+id+"/reset-password", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	chiCtx := chi.NewRouteContext()
+	chiCtx.URLParams.Add("id", id)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, chiCtx))
+
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected error object")
+	}
+	if errObj["code"] != "validation_failed" {
+		t.Errorf("code = %q, want validation_failed", errObj["code"])
+	}
+	details, ok := errObj["details"].([]any)
+	if !ok || len(details) == 0 {
+		t.Fatal("expected non-empty details array")
+	}
+	found := false
+	for _, d := range details {
+		fieldErr := d.(map[string]any)
+		if fieldErr["field"] == "password" && fieldErr["issue"] == "gte" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected detail with field=password issue=gte, got %v", details)
 	}
 }
 
