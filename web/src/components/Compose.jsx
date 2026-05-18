@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate, useParams, useLocation } from 'react-router-dom'
 import { Send, X, Paperclip, Trash2 } from 'lucide-react'
 import {
-  createDraft, updateDraft, sendDraft, parseRecipients,
+  createDraft, updateDraft, sendDraft, parseRecipients, getMessage,
   listDraftAttachments, uploadDraftAttachment, deleteDraftAttachment,
 } from '../api'
 import RichEditor, { htmlToText } from './RichEditor'
@@ -31,6 +31,16 @@ export default function Compose() {
       setHtml(`<p></p><blockquote>On ${new Date(replyTo.date).toLocaleString()}, ${replyTo.from?.name || replyTo.from?.email} wrote:<br/>${quoted}</blockquote>`)
     }
   }, [replyTo])
+
+  useEffect(() => {
+    if (draftId && !replyTo) {
+      getMessage(draftId).then((msg) => {
+        setTo((msg.to || []).map((t) => t.name ? `${t.name} <${t.address}>` : t.address).join(', '))
+        setSubject(msg.subject || '')
+        setHtml(msg.html_body || '')
+      }).catch(() => {})
+    }
+  }, [draftId, replyTo])
 
   useEffect(() => {
     if (draftId) listDraftAttachments(draftId).then(setAttachments).catch(() => {})

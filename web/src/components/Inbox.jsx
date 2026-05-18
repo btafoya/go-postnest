@@ -153,7 +153,7 @@ export default function Inbox() {
             {messages.map((msg) => (
               <div
                 key={msg.id}
-                onClick={() => navigate(`/message/${msg.id}`)}
+                onClick={() => navigate(msg.is_draft ? `/compose/${msg.id}` : `/message/${msg.id}`)}
                 className={`flex items-center gap-3 px-4 py-2 border-b border-surface-100 hover:shadow-sm cursor-pointer transition-all ${
                   msg.is_read ? 'bg-white' : 'bg-blue-50'
                 }`}
