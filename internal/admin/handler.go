@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -89,9 +88,9 @@ func (h *Handler) listDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 type createDomainReq struct {
-	Name           string `json:"name"`
-	PostmarkToken  string `json:"postmark_token"`
-	PostmarkStream string `json:"postmark_stream"`
+	Name           string `json:"name" validate:"required,min=1,max=253,domainname"`
+	PostmarkToken  string `json:"postmark_token" validate:"max=255"`
+	PostmarkStream string `json:"postmark_stream" validate:"max=255"`
 }
 
 func (h *Handler) createDomain(w http.ResponseWriter, r *http.Request) {
@@ -101,8 +100,8 @@ func (h *Handler) createDomain(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if req.Name == "" {
-		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "name is required", StatusCode: http.StatusBadRequest})
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
 		return
 	}
 	d, err := h.store.CreateDomain(ctx, req.Name, req.PostmarkToken, req.PostmarkStream)
@@ -114,9 +113,9 @@ func (h *Handler) createDomain(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateDomainReq struct {
-	Name           string `json:"name"`
-	PostmarkToken  string `json:"postmark_token"`
-	PostmarkStream string `json:"postmark_stream"`
+	Name           string `json:"name" validate:"required,min=1,max=253,domainname"`
+	PostmarkToken  string `json:"postmark_token" validate:"max=255"`
+	PostmarkStream string `json:"postmark_stream" validate:"max=255"`
 	IsActive       bool   `json:"is_active"`
 }
 
@@ -124,7 +123,7 @@ func (h *Handler) updateDomain(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		api.WriteError(w, api.ErrValidation)
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
 		return
 	}
 	var req updateDomainReq
@@ -132,8 +131,8 @@ func (h *Handler) updateDomain(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if req.Name == "" {
-		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "name is required", StatusCode: http.StatusBadRequest})
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
 		return
 	}
 	if err := h.store.UpdateDomain(ctx, id, req.Name, req.PostmarkToken, req.PostmarkStream, req.IsActive); err != nil {
@@ -147,7 +146,7 @@ func (h *Handler) deleteDomain(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		api.WriteError(w, api.ErrValidation)
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
 		return
 	}
 	if err := h.store.DeleteDomain(ctx, id); err != nil {
@@ -161,7 +160,7 @@ func (h *Handler) toggleDomainActive(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		api.WriteError(w, api.ErrValidation)
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
 		return
 	}
 	var body struct{ IsActive bool `json:"is_active"` }
@@ -178,8 +177,21 @@ func (h *Handler) toggleDomainActive(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limitStr := r.URL.Query().Get("limit")
+	offsetStr := r.URL.Query().Get("offset")
+	limit, _ := strconv.Atoi(limitStr)
+	offset, _ := strconv.Atoi(offsetStr)
+	if limitStr == "" && offsetStr == "" {
+		limit = 20
+	} else {
+		if limitStr == "" {
+			limit = 20
+		}
+		if err := validate.Struct(listParams{Limit: limit, Offset: offset}); err != nil {
+			api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
+			return
+		}
+	}
 	users, err := h.store.ListUsers(ctx, limit, offset)
 	if err != nil {
 		api.WriteError(w, mapStoreError(err, "User"))
@@ -189,9 +201,9 @@ func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 type createUserReq struct {
-	Email        string `json:"email"`
-	Password     string `json:"password"`
-	DisplayName  string `json:"display_name"`
+	Email        string `json:"email" validate:"required,email,max=254"`
+	Password     string `json:"password" validate:"required"`
+	DisplayName  string `json:"display_name" validate:"max=255"`
 	IsSuperAdmin bool   `json:"is_super_admin"`
 }
 
@@ -202,16 +214,8 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if req.Email == "" {
-		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "email is required", StatusCode: http.StatusBadRequest})
-		return
-	}
-	if req.Password == "" {
-		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "password is required", StatusCode: http.StatusBadRequest})
-		return
-	}
-	if !strings.Contains(req.Email, "@") {
-		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "email is invalid", StatusCode: http.StatusBadRequest})
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
 		return
 	}
 	hash, err := h.hasher.hashPassword(req.Password)
@@ -228,16 +232,21 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateUserReq struct {
-	Email        string `json:"email"`
-	DisplayName  string `json:"display_name"`
+	Email        string `json:"email" validate:"required,email,max=254"`
+	DisplayName  string `json:"display_name" validate:"max=255"`
 	IsSuperAdmin bool   `json:"is_super_admin"`
+}
+
+type listParams struct {
+	Limit  int `validate:"gte=1,lte=100"`
+	Offset int `validate:"gte=0"`
 }
 
 func (h *Handler) updateUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		api.WriteError(w, api.ErrValidation)
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
 		return
 	}
 	var req updateUserReq
@@ -245,8 +254,8 @@ func (h *Handler) updateUser(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if req.Email == "" {
-		api.WriteError(w, &api.AppError{Code: "validation_failed", Message: "email is required", StatusCode: http.StatusBadRequest})
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
 		return
 	}
 	if err := h.store.UpdateUser(ctx, id, req.Email, req.DisplayName, req.IsSuperAdmin); err != nil {
@@ -260,7 +269,7 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		api.WriteError(w, api.ErrValidation)
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
 		return
 	}
 	if err := h.store.DeleteUser(ctx, id); err != nil {
@@ -274,7 +283,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		api.WriteError(w, api.ErrValidation)
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
 		return
 	}
 	var body struct{ Password string `json:"password"` }

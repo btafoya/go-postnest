@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -354,12 +355,27 @@ func TestCreateDomain_EmptyName(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
-	var resp map[string]map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["error"]["message"] != "name is required" {
-		t.Errorf("message = %q, want name is required", resp["error"]["message"])
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected error object")
+	}
+	if errObj["code"] != "validation_failed" {
+		t.Errorf("code = %q, want validation_failed", errObj["code"])
+	}
+	details, ok := errObj["details"].([]any)
+	if !ok || len(details) == 0 {
+		t.Fatal("expected non-empty details array")
+	}
+	first := details[0].(map[string]any)
+	if first["field"] != "name" {
+		t.Errorf("field = %q, want name", first["field"])
+	}
+	if first["issue"] != "required" {
+		t.Errorf("issue = %q, want required", first["issue"])
 	}
 }
 
@@ -378,12 +394,31 @@ func TestCreateUser_InvalidEmail(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
-	var resp map[string]map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["error"]["message"] != "email is invalid" {
-		t.Errorf("message = %q, want email is invalid", resp["error"]["message"])
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected error object")
+	}
+	if errObj["code"] != "validation_failed" {
+		t.Errorf("code = %q, want validation_failed", errObj["code"])
+	}
+	details, ok := errObj["details"].([]any)
+	if !ok || len(details) == 0 {
+		t.Fatal("expected non-empty details array")
+	}
+	found := false
+	for _, d := range details {
+		fieldErr := d.(map[string]any)
+		if fieldErr["field"] == "email" && fieldErr["issue"] == "email" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected detail with field=email issue=email, got %v", details)
 	}
 }
 
@@ -457,5 +492,162 @@ func TestContentType_JSON(t *testing.T) {
 	ct := rr.Header().Get("Content-Type")
 	if ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestCreateDomain_Validation(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      map[string]any
+		wantField string
+		wantIssue string
+	}{
+		{"empty name", map[string]any{"name": ""}, "name", "required"},
+		{"invalid domain chars", map[string]any{"name": "bad..domain"}, "name", "domainname"},
+		{"too long name", map[string]any{"name": strings.Repeat("a", 254)}, "name", "max"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{}
+			h := newTestHandler(store)
+			r := chi.NewRouter()
+			h.RegisterRoutes(r)
+			body, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/domains", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			errObj, ok := resp["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			if errObj["code"] != "validation_failed" {
+				t.Errorf("code = %q, want validation_failed", errObj["code"])
+			}
+			details, ok := errObj["details"].([]any)
+			if !ok || len(details) == 0 {
+				t.Fatal("expected non-empty details array")
+			}
+			found := false
+			for _, d := range details {
+				fieldErr := d.(map[string]any)
+				if fieldErr["field"] == tt.wantField && fieldErr["issue"] == tt.wantIssue {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected detail with field=%q issue=%q, got %v", tt.wantField, tt.wantIssue, details)
+			}
+		})
+	}
+}
+
+func TestCreateUser_Validation(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      map[string]any
+		wantField string
+		wantIssue string
+	}{
+		{"invalid email", map[string]any{"email": "not-an-email", "password": "secret"}, "email", "email"},
+		{"empty password", map[string]any{"email": "a@b.com", "password": ""}, "password", "required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{}
+			h := newTestHandler(store)
+			r := chi.NewRouter()
+			h.RegisterRoutes(r)
+			body, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			errObj, ok := resp["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			if errObj["code"] != "validation_failed" {
+				t.Errorf("code = %q, want validation_failed", errObj["code"])
+			}
+			details, ok := errObj["details"].([]any)
+			if !ok || len(details) == 0 {
+				t.Fatal("expected non-empty details array")
+			}
+			found := false
+			for _, d := range details {
+				fieldErr := d.(map[string]any)
+				if fieldErr["field"] == tt.wantField && fieldErr["issue"] == tt.wantIssue {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected detail with field=%q issue=%q, got %v", tt.wantField, tt.wantIssue, details)
+			}
+		})
+	}
+}
+
+func TestListUsers_InvalidPagination(t *testing.T) {
+	tests := []struct {
+		name   string
+		query  string
+		wantField string
+		wantIssue string
+	}{
+		{"limit zero", "limit=0", "Limit", "gte"},
+		{"limit too high", "limit=200", "Limit", "lte"},
+		{"offset negative", "offset=-1", "Offset", "gte"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{}
+			h := newTestHandler(store)
+			r := chi.NewRouter()
+			h.RegisterRoutes(r)
+			req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/users?"+tt.query, nil)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			errObj, ok := resp["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			details, ok := errObj["details"].([]any)
+			if !ok || len(details) == 0 {
+				t.Fatal("expected non-empty details array")
+			}
+			found := false
+			for _, d := range details {
+				fieldErr := d.(map[string]any)
+				if fieldErr["field"] == tt.wantField && fieldErr["issue"] == tt.wantIssue {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected detail with field=%q issue=%q, got %v", tt.wantField, tt.wantIssue, details)
+			}
+		})
 	}
 }
