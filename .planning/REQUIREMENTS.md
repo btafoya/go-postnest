@@ -15,12 +15,12 @@
 
 ### Error Handling
 
-- [ ] **ERR-01**: Duplicate domain name returns HTTP 409 with "Domain already exists" message
-- [ ] **ERR-02**: Missing resource returns HTTP 404 with "Not found" message
-- [ ] **ERR-03**: Invalid email format returns HTTP 400 with field-level error
-- [ ] **ERR-04**: Empty required fields return HTTP 400 with specific field names
-- [ ] **ERR-05**: Generic DB errors return HTTP 500 only for unmapped cases
-- [ ] **ERR-06**: All error responses include actionable `message` field consumable by frontend
+- [x] **ERR-01**: Duplicate domain name returns HTTP 409 with "Domain already exists" message
+- [x] **ERR-02**: Missing resource returns HTTP 404 with "Not found" message
+- [x] **ERR-03**: Invalid email format returns HTTP 400 with field-level error
+- [x] **ERR-04**: Empty required fields return HTTP 400 with specific field names
+- [x] **ERR-05**: Generic DB errors return HTTP 500 only for unmapped cases
+- [x] **ERR-06**: All error responses include actionable `message` field consumable by frontend
 
 ### Input Validation
 
@@ -83,12 +83,12 @@
 | API-03 | Phase 1 | Complete |
 | API-04 | Phase 1 | Complete |
 | API-05 | Phase 1 | Complete |
-| ERR-01 | Phase 1 | Pending |
-| ERR-02 | Phase 1 | Pending |
-| ERR-03 | Phase 1 | Pending |
-| ERR-04 | Phase 1 | Pending |
-| ERR-05 | Phase 1 | Pending |
-| ERR-06 | Phase 1 | Pending |
+| ERR-01 | Phase 1 | Complete |
+| ERR-02 | Phase 1 | Complete |
+| ERR-03 | Phase 1 | Complete |
+| ERR-04 | Phase 1 | Complete |
+| ERR-05 | Phase 1 | Complete |
+| ERR-06 | Phase 1 | Complete |
 | PROD-03 | Phase 1 | Complete |
 | VAL-01 | Phase 2 | Pending |
 | VAL-02 | Phase 2 | Pending |
