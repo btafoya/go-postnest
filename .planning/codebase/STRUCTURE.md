@@ -1,283 +1,222 @@
-# Postnest Directory Structure
+# Codebase Structure
 
-## Root Layout
+**Analysis Date:** 2026-05-18
 
-```
-.
-├── cmd/                    # Application entry points (one per binary)
-├── internal/               # Private application code
-├── web/                    # React 19 frontend source
-├── scripts/                # Build and deployment scripts
-├── design/                 # Design documents and assets
-├── docs/                   # Project documentation
-├── .planning/              # Planning artifacts (this directory)
-├── .gograph/               # Dependency graph artifacts
-├── .gstack/                # gstack harness configuration
-├── .serena/                # Serena agent configuration
-├── nix/                    # Nix flake support files
-├── go.mod                  # Go module definition (github.com/go-postnest/postnest)
-├── go.sum                  # Go dependency checksums
-├── Makefile                # Build automation
-├── docker-compose.yml      # Local development stack
-├── Dockerfile.server         # Server binary container
-├── Dockerfile.webui        # Web UI binary container
-├── Dockerfile.worker       # Worker binary container
-├── Dockerfile.migrate      # Migration binary container
-├── flake.nix               # Nix flake for reproducible builds
-├── README.md               # Project overview
-├── AGENTS.md               # Agent guidelines
-├── INTEGRATION.md          # Integration documentation
-├── PLAN.md                 # Development plan
-├── .env.example            # Example environment variables
-└── .env                    # Local environment (gitignored)
-```
-
----
-
-## `cmd/` — Entry Points
-
-Each subdirectory is a standalone binary:
+## Directory Layout
 
 ```
-cmd/
-├── admin/main.go     # CLI administration tool (create-user, create-domain, add-member, setup)
-├── migrate/main.go   # Database migration runner (up, down, version, force)
-├── server/main.go   # Primary server: HTTP API + IMAP + SMTP + DAV
-├── webui/main.go    # Static SPA server + API reverse proxy + SSE
-└── worker/main.go   # Background job processor pool
+[project-root]/
+├── cmd/                    # Entry point binaries
+│   ├── admin/              # CLI admin tool
+│   ├── migrate/            # Database migration CLI
+│   ├── server/             # HTTP + IMAP + SMTP server
+│   ├── webui/              # React SPA proxy server
+│   └── worker/             # Background job worker
+├── internal/               # Private application packages
+│   ├── api/                # HTTP middleware, errors, auth handler
+│   ├── auth/               # Authentication & session service
+│   ├── calendar/           # Calendar REST API + PGStore + iCal
+│   ├── certmanager/        # ACME TLS certificate manager
+│   ├── config/             # Environment configuration loading
+│   ├── contacts/           # Contacts store & REST handler
+│   ├── dav/                # CardDAV/CalDAV protocol adapters
+│   ├── db/                 # PostgreSQL connection pool wrapper
+│   ├── imap/               # IMAP server backend
+│   ├── logger/             # Structured JSON logger
+│   ├── mailstore/          # Mail persistence interface + PGStore
+│   ├── migrate/            # Migration runner + SQL files
+│   ├── models/             # Shared domain models
+│   ├── postmark/           # Postmark API client wrapper
+│   ├── redis/              # Redis client + queue helpers
+│   ├── reputation/         # Email reputation engine
+│   ├── search/             # Search helpers
+│   ├── smtp/               # SMTP server backend
+│   ├── webhook/            # Postmark webhook receiver
+│   ├── webmail/            # Webmail REST API + DTOs
+│   ├── webui/              # SPA proxy, SSE hub, embedded dist
+│   └── workers/            # Worker pool + job processors
+├── web/                    # React SPA frontend (Vite)
+│   ├── src/
+│   │   ├── components/     # React components (one per major view)
+│   │   ├── styles/         # Tailwind + global CSS
+│   │   └── test/           # Vitest tests
+│   ├── package.json
+│   ├── vite.config.js
+│   └── tailwind.config.js
+├── scripts/                # Build/deployment scripts
+├── docs/                   # Design documentation
+├── design/                 # Design assets
+├── nix/                    # Nix flake support
+├── docker-compose.yml     # Local dev stack
+├── Makefile               # Build automation
+├── go.mod                  # Go module definition
+└── .env.example            # Environment variable template
 ```
 
-**Naming convention**: Binary names match directory names exactly (`server`, `worker`, `webui`, `admin`, `migrate`). Build outputs are prefixed with `postnest-` in the Makefile.
+## Directory Purposes
 
----
+**cmd:**
+- Purpose: Standalone executable entry points
+- Contains: `main.go` files, each producing a single binary
+- Key files: `cmd/server/main.go`, `cmd/worker/main.go`, `cmd/webui/main.go`
 
-## `internal/` — Application Code
+**internal:**
+- Purpose: All application code (Go convention: non-importable by external modules)
+- Contains: ~20 domain packages, each self-contained
+- Key files: `internal/models/models.go` (shared entities), `internal/api/errors.go` (error contract)
 
-### Core Infrastructure
+**internal/api:**
+- Purpose: Cross-cutting HTTP concerns
+- Contains: Middleware (request ID, logging, recovery, CORS, rate limiting, auth, CSRF), auth handler, error types
+- Key files: `internal/api/middleware.go`, `internal/api/errors.go`, `internal/api/auth.go`, `internal/api/csrf.go`
 
-| Path | Purpose |
-|------|---------|
-| `internal/config/` | Configuration loading: TOML file + env var overrides with legacy fallback support |
-| `internal/db/` | PostgreSQL connection pool wrapper (`pgxpool.Pool`) |
-| `internal/redis/` | Redis client wrapper with app-specific queue helpers (`Enqueue`, `Dequeue`, `PromoteReadyDelayed`) |
-| `internal/logger/` | Structured JSON logger (`slog.NewJSONHandler`) |
+**internal/mailstore:**
+- Purpose: Mail persistence abstraction and implementation
+- Contains: `mailstore.go` (interface ~25 methods), `pgstore.go` (PostgreSQL implementation)
+- Key files: `internal/mailstore/mailstore.go`, `internal/mailstore/pgstore.go`
 
-### Domain Models
+**internal/workers:**
+- Purpose: Background job processing
+- Contains: Pool implementation, processor interface, 5 concrete processors
+- Key files: `internal/workers/workers.go`, `internal/workers/inbound.go`, `internal/workers/send.go`
 
-| Path | Purpose |
-|------|---------|
-| `internal/models/models.go` | Canonical entity structs: `User`, `Domain`, `Message`, `Thread`, `Label`, `Attachment`, `Contact`, `DeliveryLog`, `AuthSession` |
+**internal/webui:**
+- Purpose: Serve built React SPA and proxy API requests
+- Contains: Gin router, reverse proxy, SSE hub, embedded `dist/` filesystem
+- Key files: `internal/webui/router.go`, `internal/webui/proxy.go`, `internal/webui/sse.go`
 
-### Authentication & Authorization
+**web:**
+- Purpose: Frontend React application
+- Contains: JSX components, API client, styles, tests
+- Key files: `web/src/App.jsx`, `web/src/api.js`, `web/src/main.jsx`
 
-| Path | Purpose |
-|------|---------|
-| `internal/auth/auth.go` | `auth.Service` — Argon2id hashing, session/API-key validation, domain membership queries |
-
-### Persistence Stores
-
-| Path | Purpose |
-|------|---------|
-| `internal/mailstore/mailstore.go` | `Store` interface — the canonical contract for mail persistence |
-| `internal/mailstore/pgstore.go` | `PGStore` — PostgreSQL implementation of `Store` |
-| `internal/contacts/contacts.go` | `Store` interface + `PGStore` for contacts |
-
-### Protocol Servers
-
-| Path | Purpose |
-|------|---------|
-| `internal/api/` | Shared HTTP middleware: request ID, logging, recovery, CORS, rate limiting, session extraction, error types |
-| `internal/webmail/webmail.go` | REST API handler for labels, messages, threads, drafts, search (`chi/v5`) |
-| `internal/webhook/webhook.go` | Postmark webhook receiver with HMAC verification and deduplication |
-| `internal/smtp/smtp.go` | SMTP server (`go-smtp`) with PLAIN/LOGIN auth, MIME parsing, Postmark relay |
-| `internal/imap/imap.go` | IMAP server wrapper (`go-imap`) |
-| `internal/imap/backend.go` | IMAP backend: labels-as-mailboxes, flag mapping, message fetch/search/expunge |
-| `internal/dav/dav.go` | CardDAV (contacts) and CalDAV (stub) via `go-webdav` |
-
-### Workers
-
-| Path | Purpose |
-|------|---------|
-| `internal/workers/workers.go` | `Pool`, `Job`, and `Processor` interface; Redis queue orchestration |
-| `internal/workers/inbound.go` | Postmark inbound webhook processor |
-| `internal/workers/send.go` | Draft send processor ( relays to Postmark) |
-| `internal/workers/bounce.go` | Bounce event processor |
-| `internal/workers/delivery.go` | Delivery confirmation processor |
-| `internal/workers/spam.go` | Spam complaint processor |
-
-### Supporting Services
-
-| Path | Purpose |
-|------|---------|
-| `internal/postmark/postmark.go` | Thin wrapper around `mrz1836/postmark` library; inbound payload parsing |
-| `internal/search/search.go` | PostgreSQL full-text search indexer (`tsvector` updates) |
-| `internal/reputation/reputation.go` | Whitelist/blacklist/greylist engine |
-| `internal/certmanager/manager.go` | ACME certificate lifecycle (LEGO + Cloudflare DNS-01) |
-
-### Web UI Server
-
-| Path | Purpose |
-|------|---------|
-| `internal/webui/router.go` | Gin router: SSE hub, API proxy, embedded SPA static file serving |
-| `internal/webui/proxy.go` | `httputil.ReverseProxy` to backend API server |
-| `internal/webui/sse.go` | SSE hub with Redis pub/sub subscription and client broadcast |
-| `internal/webui/config.go` | `Config` struct for webui server |
-| `internal/webui/dist/` | **Generated** — Vite build output embedded into Go binary |
-
-### Migrations
-
-| Path | Purpose |
-|------|---------|
-| `internal/migrate/migrate.go` | Wrapper around `golang-migrate/migrate/v4` using embedded `iofs` source |
-| `internal/migrate/migrations/` | SQL migration files (up-only in current set) |
-| `internal/migrate/migrations/000001_init.up.sql` | Initial schema: domains, users, messages, labels, threads, contacts, reputation, delivery logs |
-| `internal/migrate/migrations/000002_fts.up.sql` | Full-text search vector setup |
-| `internal/migrate/migrations/000003_seed_labels.up.sql` | System label seeding |
-| `internal/migrate/migrations/000004_fts_trigger.up.sql` | Search vector trigger |
-| `internal/migrate/migrations/000005_search_composite.up.sql` | Search performance indexes |
-| `internal/migrate/migrations/000006_thread_unique.up.sql` | Thread uniqueness constraint |
-
----
-
-## `web/` — Frontend Source
-
-```
-web/
-├── index.html              # HTML entry point
-├── package.json            # npm dependencies (React 19, Vite, TailwindCSS, Axios, React Router)
-├── vite.config.js          # Vite config: React plugin, output to ../internal/webui/dist
-├── tailwind.config.js      # Tailwind theme with custom primary/surface color scales
-├── postcss.config.js       # PostCSS with Tailwind + Autoprefixer
-├── src/
-│   ├── main.jsx            # React DOM root mount
-│   ├── App.jsx             # Root component: auth gate, routing, SSE lifecycle
-│   ├── api.js              # Axios client + API wrappers (labels, messages, drafts, contacts, calendar)
-│   ├── sse.js              # SSE client with auto-reconnect and event emitter
-│   ├── components/
-│   │   ├── Layout.jsx      # Shell layout with navigation
-│   │   ├── Login.jsx       # Authentication form
-│   │   ├── Inbox.jsx       # Message list view
-│   │   ├── MessageView.jsx # Single message reading pane
-│   │   ├── Compose.jsx     # Draft composition
-│   │   ├── Contacts.jsx    # Address book
-│   │   ├── Calendar.jsx    # Calendar view
-│   │   └── Admin.jsx       # Domain administration
-│   └── styles/
-│       └── index.css       # Tailwind directives + global styles
-```
-
-**Build integration**: `npm run build` in `web/` outputs to `internal/webui/dist`, which is embedded into the `webui` binary.
-
----
+**internal/migrate/migrations:**
+- Purpose: Database schema evolution
+- Contains: Up-migration SQL files with sequential numbering
+- Key files: `000001_init.up.sql`, `000007_calendar.up.sql`
 
 ## Key File Locations
 
-### Configuration
-- `internal/config/loader.go` — TOML parsing and `POSTNEST_<SECTION>_<KEY>` env override logic
-- `internal/config/config.go` — Flat `Config` struct with legacy env fallback mapping
+**Entry Points:**
+- `cmd/server/main.go`: Main application server
+- `cmd/worker/main.go`: Background worker
+- `cmd/webui/main.go`: Frontend proxy
+- `cmd/admin/main.go`: Admin CLI
+- `cmd/migrate/main.go`: Migration CLI
 
-### Database Schema
-- `internal/migrate/migrations/000001_init.up.sql` — Complete initial schema
+**Configuration:**
+- `internal/config/config.go`: `Config` struct with env var tags
+- `internal/config/loader.go`: `Load()` implementation
+- `.env.example`: Template for required environment variables
 
-### Error Handling
-- `internal/api/errors.go` — Unified `AppError` and `WriteError`
+**Core Logic:**
+- `internal/models/models.go`: All domain entities
+- `internal/auth/auth.go`: Password hashing, sessions, domain authorization
+- `internal/mailstore/mailstore.go`: Store interface contract
+- `internal/mailstore/pgstore.go`: PostgreSQL implementation
 
-### Middleware
-- `internal/api/middleware.go` — `RequestID`, `StructuredLogger`, `Recovery`, `CORS`, `RateLimiter`, `RequireSession`, `RequireDomainAdmin`
+**API Handlers:**
+- `internal/webmail/webmail.go`: Webmail REST routes (labels, messages, drafts, attachments, search)
+- `internal/calendar/handler.go`: Calendar REST routes
+- `internal/contacts/handler.go`: Contacts REST routes
+- `internal/webhook/webhook.go`: Postmark inbound/bounce/delivery/spam webhooks
+- `internal/dav/dav.go`: CardDAV/CalDAV protocol handlers
 
-### IMAP Backend Detail
-- `internal/imap/backend.go` — All IMAP command implementations (LOGIN, LIST, SELECT, FETCH, SEARCH, STORE, EXPUNGE, COPY)
+**Protocol Servers:**
+- `internal/imap/imap.go`: IMAP backend + server wrapper
+- `internal/smtp/smtp.go`: SMTP backend + server wrapper
 
----
+**Testing:**
+- `internal/api/*_test.go`: Middleware/error tests
+- `internal/auth/auth_test.go`: Auth service tests
+- `internal/calendar/ical_test.go`: iCal conversion tests
+- `internal/redis/redis_test.go`: Redis client tests
+- `internal/smtp/smtp_test.go`: SMTP tests
+- `internal/webhook/webhook_test.go`: Webhook tests
+- `internal/webmail/dto_test.go`, `webmail_test.go`: DTO + handler tests
+- `internal/workers/workers_test.go`: Worker pool tests
+- `internal/config/loader_test.go`: Config loader tests
+- `web/src/test/*.test.js`, `*.test.jsx`: Frontend Vitest tests
 
 ## Naming Conventions
 
-### Go
+**Files:**
+- Go files: lowercase with underscore for multi-word (`pgstore.go`, `middleware_test.go`)
+- Frontend components: PascalCase matching component name (`Inbox.jsx`, `Compose.jsx`)
+- API client: lowercase (`api.js`, `sse.js`)
+- Styles: lowercase (`index.css`)
 
-| Pattern | Example |
-|---------|---------|
-| **Packages** | Single word, lowercase: `mailstore`, `certmanager`, `webmail` |
-| **Interfaces** | Noun describing capability: `Store`, `Processor`, `DomainLister` |
-| **Implementations** | Prefix with storage/driver: `PGStore`, `InboundProcessor` |
-| **Constructors** | `New` + type name: `NewPool`, `NewHandler`, `NewServer` |
-| **Handler methods** | HTTP verb or action prefix: `listLabels`, `createDraft`, `patchMessage` |
-| **Context keys** | Unexported typed string constants: `ctxKeyUser`, `ctxKeyRequestID` |
-| **Error variables** | `Err` prefix: `ErrNotFound`, `ErrUnauthorized`, `ErrRateLimited` |
-| **Binary names** | Match `cmd/` directory: `server`, `worker`, `webui`, `admin`, `migrate` |
+**Directories:**
+- Go packages: lowercase single word (`mailstore`, `webmail`, `certmanager`)
+- Frontend components directory: lowercase plural (`components/`)
 
-### React
+**Types:**
+- Interfaces: noun describing capability (`Store`, `DomainLister`, `Processor`)
+- Implementations: package prefix + interface name (`PGStore`, `AuthHandler`)
+- DTOs: lowercase with `DTO` suffix in Go (`messageDTO`, `calendarDTO`); frontend uses plain objects
+- Context keys: unexported typed string constants (`ctxKeyUser`, `ctxKeyDomainID`)
 
-| Pattern | Example |
-|---------|---------|
-| **Components** | PascalCase, noun: `Inbox.jsx`, `MessageView.jsx`, `Layout.jsx` |
-| **API functions** | camelCase, verb prefix: `getLabels`, `createDraft`, `sendDraft` |
-| **Client modules** | lowercase: `api.js`, `sse.js` |
+**Functions:**
+- Constructors: `New` + type name (`NewHandler`, `NewPool`, `NewPGStore`)
+- Route registration: `RegisterRoutes` on handler types
+- Context extraction: `XFromContext` pattern (`UserFromContext`, `DomainIDFromContext`)
 
-### SQL / Database
+## Where to Add New Code
 
-| Pattern | Example |
-|---------|---------|
-| **Tables** | Plural, snake_case: `messages`, `domain_members`, `delivery_logs` |
-| **Indexes** | Descriptive suffix: `messages_domain_user_mailbox_idx`, `auth_sessions_token_hash_idx` |
-| **Constraints** | Inline or via migration; `ON DELETE CASCADE` for domain-scoped data |
-| **UUID generation** | `gen_random_uuid()` (pgcrypto) or `uuid.NewV7()` in code |
+**New REST API Feature:**
+- Handler: `internal/<feature>/handler.go`
+- Store interface: `internal/<feature>/<feature>.go`
+- PGStore implementation: `internal/<feature>/pgstore.go`
+- DTOs: `internal/<feature>/dto.go`
+- Register routes in `cmd/server/main.go` inside authenticated group
+- Wire store instantiation in `cmd/server/main.go`
+
+**New Worker Job Type:**
+- Processor: `internal/workers/<type>.go` implementing `Processor` interface
+- Register in `cmd/worker/main.go`: `pool.Register("<type>", workers.NewXProcessor(...))`
+- Enqueue from handlers via `h.redis.Enqueue(ctx, "queue:jobs", jobBytes)` or `pool.Enqueue`
+
+**New Frontend Page:**
+- Component: `web/src/components/<Name>.jsx`
+- Route: add to `web/src/App.jsx` inside `<Routes>`
+- API client functions: add to `web/src/api.js`
+
+**New Database Table:**
+- Migration: `internal/migrate/migrations/000XXX_<name>.up.sql`
+- Model: add struct to `internal/models/models.go`
+- Store methods: add to relevant store interface + PGStore
+
+**New Middleware:**
+- Add to `internal/api/middleware.go`
+- Register in `cmd/server/main.go` on the chi router
+- Add tests in `internal/api/middleware_test.go`
+
+**Utilities:**
+- Shared helpers: add to the package where used, or `internal/api/` if HTTP-specific
+- Cross-package helpers: consider `internal/utils/` (does not exist currently; add if justified)
+
+## Special Directories
+
+**internal/webui/dist:**
+- Purpose: Embedded build output of the React SPA
+- Generated: Yes (via `vite build` in `web/`)
+- Committed: Yes (currently tracked; embed directive requires files at build time)
+
+**internal/migrate/migrations:**
+- Purpose: SQL schema migrations
+- Generated: No (handwritten)
+- Committed: Yes
+
+**.planning:**
+- Purpose: GSD planning documents, codebase analysis, phase plans
+- Generated: Yes (by agent workflows)
+- Committed: Yes
+
+**web/node_modules:**
+- Purpose: Frontend dependencies
+- Generated: Yes (by npm)
+- Committed: No (in `.gitignore`)
 
 ---
 
-## Module Organization
-
-### Import Graph (Simplified)
-
-```
-cmd/server
-  ├─ internal/api
-  ├─ internal/auth
-  ├─ internal/certmanager
-  ├─ internal/config
-  ├─ internal/contacts
-  ├─ internal/dav
-  ├─ internal/db
-  ├─ internal/imap
-  ├─ internal/logger
-  ├─ internal/mailstore
-  ├─ internal/postmark
-  ├─ internal/redis
-  ├─ internal/smtp
-  ├─ internal/webhook
-  └─ internal/webmail
-
-cmd/worker
-  ├─ internal/auth
-  ├─ internal/config
-  ├─ internal/db
-  ├─ internal/logger
-  ├─ internal/mailstore
-  ├─ internal/postmark
-  ├─ internal/redis
-  ├─ internal/reputation
-  └─ internal/workers
-
-cmd/webui
-  └─ internal/webui
-      ├─ internal/logger
-      └─ internal/redis (via SSE)
-
-cmd/admin
-  ├─ internal/auth
-  ├─ internal/config
-  ├─ internal/logger
-  └─ internal/models
-
-cmd/migrate
-  ├─ internal/config
-  └─ internal/migrate
-```
-
-### Dependency Rules
-
-1. **`models`** has zero internal dependencies. It is imported by almost every other package.
-2. **`api`** is a leaf package imported by handlers; it does not import domain packages except `auth` and `models`.
-3. **`mailstore`** and **`contacts`** are the only packages that import `db` (indirectly via `pgxpool.Pool`).
-4. **`webui`** is a leaf server package; it only proxies to the backend and serves static assets.
-5. **`workers`** processors import `mailstore`, `auth`, `postmark`, `reputation`, but not each other.
-6. **`config`** is imported by all `cmd/*` packages. It has no internal dependencies.
+*Structure analysis: 2026-05-18*

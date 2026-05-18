@@ -1,316 +1,176 @@
-# Postnest Architecture
+# Architecture
 
-## Overview
+**Analysis Date:** 2026-05-18
 
-Postnest is a multi-protocol email platform written in Go 1.25.0 with a React 19 frontend. It provides HTTP REST APIs, IMAP, SMTP, CardDAV/CalDAV, and a web UI, backed by PostgreSQL and Redis. Outbound email is relayed through Postmark; inbound email is received via Postmark webhooks.
+## Pattern Overview
 
-The codebase follows a **service-oriented, multi-binary architecture** with interface-driven persistence layers and explicit dependency injection in each `main()`.
+**Overall:** Modular monolith with domain-driven internal packages, multi-binary Go deployment, and a separate React SPA frontend proxy.
 
----
-
-## Patterns
-
-### Multi-Binary Deployment
-The project ships as five separate binaries, each with a single responsibility:
-
-| Binary | Source | Responsibility |
-|--------|--------|--------------|
-| `server` | `cmd/server/main.go` | HTTP API, IMAP, SMTP, DAV servers |
-| `worker` | `cmd/worker/main.go` | Background job processors |
-| `webui` | `cmd/webui/main.go` | Static SPA host + API reverse proxy |
-| `admin` | `cmd/admin/main.go` | CLI user/domain administration |
-| `migrate` | `cmd/migrate/main.go` | Database schema migrations |
-
-Each binary imports only the internal packages it needs and constructs its own dependency graph. There is no shared runtime or service locator.
-
-### Interface-Driven Persistence
-Persistence is defined by interfaces in the domain package, implemented by a PostgreSQL-backed concrete type:
-
-```go
-// internal/mailstore/mailstore.go
-type Store interface {
-    CreateMessage(ctx context.Context, msg *models.Message, labelIDs []uuid.UUID, attachments []*models.Attachment) error
-    GetMessage(ctx context.Context, domainID, userID, messageID uuid.UUID) (*models.Message, error)
-    // ... 25+ methods
-}
-
-// internal/mailstore/pgstore.go
-type PGStore struct { pool *pgxpool.Pool }
-func NewPGStore(pool *pgxpool.Pool) *PGStore
-```
-
-The same pattern is used for `contacts.Store` (`internal/contacts/contacts.go`).
-
-### Dependency Injection via Constructors
-Every service exposes a constructor that accepts its dependencies explicitly:
-
-```go
-// cmd/server/main.go
-authService := auth.NewService(pgPool.Pool, cfg.Argon2idTime, cfg.Argon2idMemory, cfg.Argon2idThreads, cfg.SessionKey)
-mailStore := mailstore.NewPGStore(pgPool.Pool)
-webmailHandler := webmail.NewHandler(mailStore, authService, redisClient)
-```
-
-There is no reflection-based DI container.
-
-### Embedded Static Assets
-The React frontend is built into `internal/webui/dist`, which is embedded into the `webui` binary via `//go:embed all:dist`:
-
-```go
-// internal/webui/router.go
-//go:embed all:dist
-var distFS embed.FS
-```
-
-This allows the `webui` binary to serve the SPA and proxy API calls without external file dependencies.
-
----
+**Key Characteristics:**
+- Five standalone binaries built from `cmd/*` entry points sharing `internal/` packages
+- Domain-scoped multi-tenancy: users belong to domains via `domain_members`; most data is scoped to `(domain_id, user_id)`
+- Interface-driven persistence: `mailstore.Store`, `contacts.Store`, `calendar.Store` define contracts; `PGStore` implements them
+- Redis-backed job queue for asynchronous worker processing
+- Dual protocol support: HTTP REST API + raw IMAP/SMTP servers
 
 ## Layers
 
-### 1. Models (`internal/models/models.go`)
-Pure data structures with no behavior:
+**Entry Points / Commands:**
+- Purpose: Standalone deployable binaries
+- Location: `cmd/`
+- Contains: `main.go` files for server, worker, webui, admin CLI, migrate CLI
+- Depends on: internal packages
+- Used by: Operations/deployment
 
-- `User`, `Domain`, `DomainMember`
-- `Message`, `Thread`, `Label`, `Attachment`
-- `Contact`, `DeliveryLog`, `AuthSession`
+**API / Transport Layer:**
+- Purpose: HTTP handlers, middleware, routing, protocol adapters
+- Location: `internal/api/`, `internal/webmail/`, `internal/calendar/`, `internal/contacts/`, `internal/webhook/`, `internal/dav/`, `internal/imap/`, `internal/smtp/`, `internal/webui/`
+- Contains: Chi router handlers, Gin router for webui proxy, IMAP/SMTP backends, CardDAV/CalDAV adapters
+- Depends on: auth service, stores, models, redis, postmark
+- Used by: Entry points
 
-All entities use `github.com/google/uuid` v7 UUIDs for primary keys.
+**Service Layer:**
+- Purpose: Business logic, authentication, orchestration
+- Location: `internal/auth/`, `internal/workers/`, `internal/reputation/`, `internal/certmanager/`
+- Contains: Auth service with Argon2id hashing, session management, worker pool with job processors, reputation engine, ACME certificate manager
+- Depends on: db, redis, models
+- Used by: API layer, entry points
 
-### 2. Persistence (`internal/db`, `internal/mailstore`, `internal/contacts`)
+**Data / Persistence Layer:**
+- Purpose: Database access, caching, external API clients
+- Location: `internal/db/`, `internal/redis/`, `internal/mailstore/`, `internal/postmark/`, `internal/search/`
+- Contains: pgx pool wrapper, Redis queue client, mailstore interface + PGStore, Postmark client wrapper
+- Depends on: models
+- Used by: Service layer, API layer
 
-- `db.Pool` — thin wrapper around `pgxpool.Pool` with lifecycle helpers.
-- `mailstore.PGStore` — implements `mailstore.Store`; handles messages, threads, labels, attachments, flags, delivery logs, and full-text search.
-- `contacts.PGStore` — implements `contacts.Store`; handles vCard-backed contacts.
+**Models:**
+- Purpose: Domain entities shared across all layers
+- Location: `internal/models/`
+- Contains: User, Domain, DomainMember, Message, Label, Attachment, Thread, Contact, DeliveryLog, AuthSession, Calendar, CalendarEvent
+- Depends on: uuid
+- Used by: All layers
 
-Key patterns:
-- Transactions via `pgx.Tx` for multi-table writes (e.g., `CreateMessage` inserts into `messages`, `message_labels`, and `attachments`).
-- `ON CONFLICT` for upserts (contacts, thread creation).
-- `pgx.CopyFrom` for bulk attachment inserts.
-- PostgreSQL `TSVECTOR` with weighted components for full-text search (`Search`, `UpdateSearchVector`).
+**Configuration:**
+- Purpose: Environment-based configuration loading
+- Location: `internal/config/`
+- Contains: `Config` struct, `Load()` from env vars, template helpers
+- Depends on: none
+- Used by: All entry points
 
-### 3. Services (`internal/auth`, `internal/reputation`, `internal/certmanager`)
-
-- `auth.Service` — password hashing (Argon2id), session/API-key creation and validation, domain membership checks.
-- `reputation.Engine` — whitelist/blacklist/greylist evaluation for inbound mail.
-- `certmanager.Manager` — ACME certificate lifecycle via `lego/v4` (Cloudflare DNS-01 challenge), background renewal loop.
-
-### 4. Protocol Handlers (`internal/api`, `internal/webmail`, `internal/webhook`, `internal/smtp`, `internal/imap`, `internal/dav`)
-
-- `api` — shared HTTP middleware (request ID, structured logging, recovery, CORS, rate limiting, session extraction).
-- `webmail.Handler` — REST API for labels, messages, threads, drafts, search. Uses `chi/v5` router.
-- `webhook.Handler` — public POST endpoints for Postmark inbound, bounce, delivery, and spam events. Verifies HMAC-SHA256 signatures and deduplicates via Redis `SETNX`.
-- `smtp.Server` — go-smtp server with PLAIN and LOGIN auth. Parses MIME, forwards outbound to Postmark, stores sent copy.
-- `imap.Server` — go-imap backend mapping labels to mailboxes. Supports FETCH, SEARCH, STORE, EXPUNGE, COPY.
-- `dav.Handler` — CardDAV (contacts) and CalDAV (stub) via go-webdav. Basic auth against `auth.Service`.
-
-### 5. Workers (`internal/workers`)
-A Redis-backed job queue with pluggable processors:
-
-```go
-pool := workers.NewPool(redisClient, log, cfg.WorkerConcurrency, cfg.WorkerPollInterval)
-pool.Register("inbound", workers.NewInboundProcessor(...))
-pool.Register("bounce",  workers.NewBounceProcessor(...))
-pool.Register("delivery", workers.NewDeliveryProcessor(...))
-pool.Register("send_draft", workers.NewSendProcessor(...))
-pool.Register("spam", workers.NewSpamProcessor(...))
-```
-
-Queue semantics:
-- Three Redis keys: `queue:jobs` (list), `queue:jobs:delayed` (sorted set), `queue:jobs:dead` (list).
-- `BRPop` for blocking dequeue; delayed jobs promoted via `ZRangeByScore`.
-- Exponential backoff on retry (5s * attempts); max 3 attempts before dead-lettering.
-
-### 6. Frontend (`web/`)
-React 19 SPA built with Vite and TailwindCSS. Communicates with backend via:
-- `axios` client (`web/src/api.js`) with cookie-based auth.
-- SSE client (`web/src/sse.js`) for real-time mailbox updates.
-- React Router v7 for client-side routing.
-
-The `webui` server proxies `/api/*`, `/admin/*`, `/webhooks/*`, `/healthz`, `/.well-known/*`, `/dav/*` to the backend API server.
-
----
+**Infrastructure:**
+- Purpose: Logging, migrations
+- Location: `internal/logger/`, `internal/migrate/`
+- Contains: Structured slog JSON logger, golang-migrate wrapper
+- Depends on: none
+- Used by: All entry points
 
 ## Data Flow
 
-### Inbound Email (Postmark Webhook)
+**Inbound Email (Postmark Webhook):**
+1. Postmark sends webhook to `POST /webhooks/postmark/inbound` (`internal/webhook/webhook.go`)
+2. Webhook handler verifies HMAC signature, deduplicates via Redis, enqueues job to `queue:jobs`
+3. Worker binary (`cmd/worker/main.go`) polls Redis and routes to `workers.NewInboundProcessor`
+4. Inbound processor parses payload, stores message via `mailstore.Store.CreateMessage`
+5. Message appears in webmail inbox with INBOX label
 
-```
-Postmark --POST--> /webhooks/postmark/inbound
-  webhook.Handler.verifySignature()
-  webhook.Handler.dedup() // Redis SETNX
-  webhook.Handler.enqueue("inbound", payload)
+**Outbound Email (SMTP Submit):**
+1. Mail client connects to IMAP/SMTP server (`cmd/server/main.go`)
+2. SMTP backend (`internal/smtp/smtp.go`) authenticates via `auth.Service.Authenticate`
+3. On DATA, parses MIME, validates sender domain membership, forwards to Postmark
+4. Stores copy in SENT mailbox via `mailstore.Store.CreateMessage`
 
-Redis queue:jobs <-- worker.Pool.dequeue()
-  InboundProcessor.Process()
-    auth.GetDomainByName()
-    auth.GetUserByEmail()
-    reputation.EvaluateInbound() // whitelist/blacklist/greylist
-    mailstore.FindOrCreateThread()
-    mailstore.CreateMessage() + INBOX label
-    mailstore.UpdateSearchVector()
-```
+**Webmail Compose (Draft + Send):**
+1. Frontend POST `/api/v1/drafts` -> `webmail.Handler.createDraft`
+2. Draft stored with `is_draft=true`, `mailbox=DRAFTS`
+3. Frontend POST `/api/v1/drafts/{id}/send` -> enqueues `send_draft` job to Redis
+4. Worker `send_draft` processor (`internal/workers/send.go`) fetches draft, sends via Postmark, updates to non-draft
 
-### Outbound Email (SMTP or Web Draft)
+**CalDAV/CardDAV:**
+1. DAV client authenticates with Basic Auth via `internal/dav/dav.go` middleware
+2. `carddavBackend`/`caldavBackend` translate DAV operations to `contacts.Store`/`calendar.Store`
+3. Data persisted in PostgreSQL
 
-**Via SMTP client:**
-```
-SMTP client --AUTH PLAIN/LOGIN--> smtp.Server
-  smtpSession.Auth() -> auth.Authenticate()
-  smtpSession.Mail() -> auth.IsDomainMember()
-  smtpSession.Data() -> go-message parser
-    postmark.SendEmail() -> Postmark API
-    mailstore.CreateMessage() + SENT label
-```
+**State Management:**
+- Server-side: PostgreSQL for persistent state, Redis for job queues and deduplication
+- Client-side: React SPA with local component state (no global state library)
+- Real-time: SSE hub in webui proxy (`internal/webui/sse.go`) subscribes to Redis pub/sub
 
-**Via Web UI draft:**
-```
-Browser POST /api/v1/drafts -> webmail.createDraft()
-Browser POST /api/v1/drafts/{id}/send -> webmail.sendDraft()
-  workers.Job enqueue to Redis "send_draft"
-  SendProcessor.Process()
-    postmark.SendEmail()
-    mailstore.UpdateMessage() // is_draft=false, mailbox=SENT
-    mailstore.CreateDeliveryLog()
-```
+## Key Abstractions
 
-### Web UI Request
+**mailstore.Store:**
+- Purpose: Canonical persistence contract for all mail data
+- Examples: `internal/mailstore/mailstore.go` (interface), `internal/mailstore/pgstore.go` (implementation)
+- Pattern: Interface with PGStore implementing ~25 methods for messages, labels, attachments, threads, delivery logs
 
-```
-Browser --> webui server (:3000)
-  /events -> SSEHub (Redis pub/sub broadcast)
-  /api/* -> APIProxy -> backend server (:8080)
-  /* -> embed.FS static assets / index.html SPA fallback
-```
+**auth.Service:**
+- Purpose: Authentication, session management, domain authorization
+- Examples: `internal/auth/auth.go`
+- Pattern: Service struct with pgxpool, holds Argon2id parameters and session key; provides `Authenticate`, `ValidateSession`, `IsDomainAdmin`
 
-### IMAP Session
+**api.AppError:**
+- Purpose: Unified error type for all HTTP handlers
+- Examples: `internal/api/errors.go`
+- Pattern: Struct with Code, Message, Details, StatusCode; predeclared errors like `ErrNotFound`, `ErrUnauthorized`; `WriteError` renders JSON
 
-```
-IMAP client --AUTH--> imap.Server
-  imapBackend.Login() -> auth.Authenticate() + GetUserDomains()
-  imapUser.ListMailboxes() -> mailstore.GetLabels()
-  imapMailbox.ListMessages() -> mailstore.ListMessages() + GetFlagsBatch()
-```
+**workers.Processor / workers.Pool:**
+- Purpose: Pluggable background job processing
+- Examples: `internal/workers/workers.go`
+- Pattern: Pool polls Redis list, dispatches to registered `Processor` by job type, handles retries with exponential backoff and dead-letter queue
 
----
-
-## Abstractions
-
-### Context Values for Request Scoping
-`internal/api/middleware.go` defines typed context keys:
-
-```go
-type ctxKey string
-const ctxKeyUser ctxKey = "user"
-const ctxKeyDomainID ctxKey = "domain_id"
-const ctxKeyRequestID ctxKey = "request_id"
-```
-
-`RequireSession` middleware populates the user; `RequireDomainAdmin` populates the domain ID.
-
-### Unified Errors
-`internal/api/errors.go` provides a single `AppError` type with structured field errors:
-
-```go
-type AppError struct {
-    Code       string     `json:"code"`
-    Message    string     `json:"message"`
-    Details    []FieldError `json:"details,omitempty"`
-    StatusCode int        `json:"-"`
-}
-```
-
-Common errors are package-level vars (`ErrNotFound`, `ErrUnauthorized`, `ErrRateLimited`).
-
-### Store Patches
-`mailstore.MessagePatch` uses pointer fields to distinguish "unset" from "false":
-
-```go
-type MessagePatch struct {
-    IsRead    *bool
-    IsFlagged *bool
-    // ...
-}
-```
-
-This allows `UPDATE ... SET is_read = coalesce($4, is_read)` semantics.
-
----
+**Domain + User Scoping:**
+- Purpose: Multi-tenant data isolation
+- Examples: Every store method signature includes `(ctx, domainID, userID, ...)`
+- Pattern: UUID pair `(domain_id, user_id)` scopes all queries; users can belong to multiple domains via `domain_members` with roles (admin, user, readonly)
 
 ## Entry Points
 
-### `cmd/server/main.go`
-The largest entry point. It:
-1. Loads config (`config.Load()`).
-2. Opens PostgreSQL and Redis.
-3. Constructs services (`auth`, `mailstore`, `contacts`, `postmark`).
-4. Registers `chi` routes: public health, webhooks (public), authenticated webmail API, admin API.
-5. Configures TLS: ACME, static cert, or insecure/plaintext.
-6. Starts IMAP and SMTP listeners (optionally TLS-wrapped).
-7. Registers DAV routes.
-8. Blocks on `SIGINT`/`SIGTERM`, then gracefully shuts down all servers.
+**cmd/server/main.go:**
+- Location: `cmd/server/main.go`
+- Triggers: Direct execution, Docker container, systemd
+- Responsibilities: Load config, connect Postgres + Redis, wire all services, start HTTP API server on `:8080`, start IMAP on `:143/:993`, start SMTP on `:587/:465`, handle TLS (static or ACME), graceful shutdown on SIGTERM
 
-### `cmd/worker/main.go`
-1. Loads config.
-2. Opens PostgreSQL and Redis.
-3. Constructs `workers.Pool` and registers all processors.
-4. Calls `pool.Start(ctx)` and blocks on signals.
+**cmd/worker/main.go:**
+- Location: `cmd/worker/main.go`
+- Triggers: Direct execution, separate worker container
+- Responsibilities: Load config, connect Postgres + Redis, create worker pool, register 5 processors (inbound, bounce, delivery, send_draft, spam), consume from Redis queue
 
-### `cmd/webui/main.go`
-1. Parses env vars into `webui.Config`.
-2. Creates a Gin router (`webui.NewRouter`).
-3. Starts HTTP server and blocks on signals.
+**cmd/webui/main.go:**
+- Location: `cmd/webui/main.go`
+- Triggers: Direct execution
+- Responsibilities: Start Gin server on `:3000`, serve embedded React SPA (`internal/webui/dist`), proxy API routes to backend, run SSE hub
 
-### `cmd/admin/main.go`
-CLI tool with subcommands: `create-user`, `create-domain`, `add-member`, `setup`. Directly queries PostgreSQL with `pgxpool`.
+**cmd/admin/main.go:**
+- Location: `cmd/admin/main.go`
+- Triggers: CLI invocation
+- Responsibilities: Bootstrap operations: create-user, create-domain, add-member, setup (all-in-one), reset-password
 
-### `cmd/migrate/main.go`
-Wraps `golang-migrate/migrate/v4` with embedded SQL files. Supports `up`, `down`, `version`, `force`.
+**cmd/migrate/main.go:**
+- Location: `cmd/migrate/main.go`
+- Triggers: CLI invocation, init containers
+- Responsibilities: Run golang-migrate up/down/version/force against Postgres DSN
 
----
+## Error Handling
 
-## Service Boundaries
+**Strategy:** Unified `api.AppError` type with structured JSON responses. Lower layers return plain `error`; handlers map to `AppError` via `api.WriteError`.
 
-### Authentication & Authorization (`internal/auth`)
-- **Inbound**: email + password → Argon2id verify → `models.User`.
-- **Session**: random 32-byte token → SHA-256 hash stored in `auth_sessions`.
-- **API Key**: same table, `type='api_key'`.
-- **Domain roles**: `domain_members(role)` — `admin`, `user`, `readonly`.
+**Patterns:**
+- `api.As(err, &appErr)` attempts to cast to `AppError`; unhandled errors map to `ErrInternal` (500)
+- pgx `ErrNoRows` typically mapped to `ErrNotFound` in handler layers
+- SMTP/IMAP backends return protocol-specific error structs (`smtp.SMTPError`) with enhanced status codes
+- Panics recovered by `api.Recovery` middleware, logged with stack trace, returned as 500
 
-### Mail Storage (`internal/mailstore`)
-- Single interface for all mail persistence.
-- Gmail-style labels via `labels` + `message_labels` many-to-many.
-- Threading by `subject_hash` + `message_ids` array.
-- Full-text search via PostgreSQL `tsvector`.
+## Cross-Cutting Concerns
 
-### Contacts (`internal/contacts`)
-- Separate `Store` interface.
-- Upsert on `(domain_id, user_id, email)`.
-- Exposed via CardDAV at `/dav/contacts/`.
+**Logging:** Structured JSON logging via `internal/logger/logger.go` using `log/slog`. Every request logged with method, path, duration, request_id. Worker jobs log failures with type and error.
 
-### Workers (`internal/workers`)
-- Redis-backed queue; no external job framework.
-- Processors are stateless and receive `context.Context`.
-- All processors accept dependencies via constructors (e.g., `mailstore.Store`, `auth.Service`, `postmark.Client`).
+**Validation:** Minimal validation in handlers: JSON decode + manual field checks. `api.NewValidationError` returns structured field errors. Email addresses validated with `net/mail.ParseAddress`. HTML sanitized with `bluemonday.UGCPolicy()`.
 
-### Certificate Management (`internal/certmanager`)
-- ACME via `lego/v4` with DNS-01 challenge.
-- Supports Cloudflare out of the box.
-- Stores account key and registration in `cfg.CertDir/accounts/<hash>/`.
-- Background renewal ticker.
+**Authentication:** Session cookies (HttpOnly, Secure, SameSite=Strict) or Bearer tokens. CSRF token required for mutating requests. DAV uses Basic Auth against same `auth.Service`. IMAP/SMTP use SASL PLAIN/LOGIN against same `auth.Service`. Sessions stored as SHA256(token_hash) in `auth_sessions` table.
 
-### Postmark Integration (`internal/postmark`)
-- Thin wrapper around `mrz1836/postmark` library.
-- `SendEmail` creates a per-call HTTP client (timeout 30s).
-- `ParseInbound` unmarshals webhook payloads into a structured type.
+**Rate Limiting:** In-memory per-IP token bucket in `api.RateLimiter` (100 requests/minute). No distributed rate limiting.
+
+**CORS:** Origin-allowlist comparison in both server (`api.CORS`) and webui (`corsMiddleware`).
 
 ---
 
-## Notable Design Decisions
-
-1. **No ORM**: All SQL is hand-written with `pgx` for explicit query control and full-text search.
-2. **No shared state between binaries**: `server` and `worker` are separate processes communicating only through Redis and PostgreSQL.
-3. **Web UI as separate binary**: The SPA is served by a dedicated `webui` process that reverse-proxies API calls, allowing independent scaling and caching strategies.
-4. **IMAP labels-as-mailboxes**: The label system is exposed as IMAP mailboxes, making the system compatible with standard email clients.
-5. **Search indexing is synchronous**: `UpdateSearchVector` runs inline after message creation. At scale this should be moved to an async worker.
-6. **Greylist/reputation is synchronous in inbound worker**: The `InboundProcessor` evaluates reputation before storing the message.
+*Architecture analysis: 2026-05-18*
