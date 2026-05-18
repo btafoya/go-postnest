@@ -58,7 +58,7 @@ export default function Layout({ user }) {
         <nav className="flex-1 overflow-y-auto py-2">
           {navItems.map((item) => {
             const Icon = item.icon
-            const isActive = location.pathname === item.path || location.pathname.startsWith(item.path)
+            const isActive = item.path === '/' ? location.pathname === '/' : location.pathname === item.path || location.pathname.startsWith(item.path)
             return (
               <button
                 key={item.id}
