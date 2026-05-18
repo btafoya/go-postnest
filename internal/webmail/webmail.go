@@ -205,6 +205,8 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	var mailboxFilter string
 	if v := q.Get("label_id"); v != "" {
 		switch v {
+		case "inbox":
+			mailboxFilter = "INBOX"
 		case "sent", "drafts", "trash", "junk":
 			mailboxFilter = strings.ToUpper(v)
 		default:
@@ -213,6 +215,8 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 				labelID = &id
 			}
 		}
+	} else {
+		mailboxFilter = "INBOX"
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
