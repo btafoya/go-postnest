@@ -37,7 +37,7 @@
 - [x] **LOG-03**: `ListUsers` fetches all memberships in single query (fix N+1)
 - [x] **LOG-04**: `ListDomains` returns pagination metadata (total count)
 - [x] **LOG-05**: `ListUsers` returns pagination metadata (total count)
-- [ ] **LOG-06**: Health endpoint moved from `cmd/server/main.go` to `internal/admin/health.go`
+- [x] **LOG-06**: Health endpoint moved from `cmd/server/main.go` to `internal/admin/health.go`
 
 ### Frontend Integration
 
@@ -100,7 +100,7 @@
 | LOG-03 | Phase 2 | Complete |
 | LOG-04 | Phase 2 | Complete |
 | LOG-05 | Phase 2 | Complete |
-| LOG-06 | Phase 2 | Pending |
+| LOG-06 | Phase 2 | Complete |
 | FE-01 | Phase 3 | Pending |
 | FE-02 | Phase 3 | Pending |
 | FE-03 | Phase 3 | Pending |
