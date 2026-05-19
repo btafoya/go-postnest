@@ -192,8 +192,7 @@ func main() {
 		certMgrCtx, certMgrCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer certMgrCancel()
 		if err := certMgr.Start(certMgrCtx); err != nil {
-			log.Error("failed to start certificate manager", "error", err)
-			os.Exit(1)
+			log.Error("certificate manager initial obtain failed; continuing without TLS for IMAP/SMTP", "error", err)
 		}
 
 		// Admin UI mutations persist to the DB then call this to hot-reload.

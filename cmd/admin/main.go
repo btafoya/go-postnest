@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/spf13/pflag"
 	"github.com/go-postnest/postnest/internal/auth"
 	"github.com/go-postnest/postnest/internal/config"
 	"github.com/go-postnest/postnest/internal/logger"
@@ -21,11 +21,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Usage: admin <command> [args]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
-	fmt.Fprintln(os.Stderr, "  create-user    --email --password --name [--super-admin]")
-	fmt.Fprintln(os.Stderr, "  create-domain  --name [--postmark-token]")
-	fmt.Fprintln(os.Stderr, "  add-member     --domain-id --user-id --role [admin|user|readonly]")
-	fmt.Fprintln(os.Stderr, "  reset-password --email --password")
-	fmt.Fprintln(os.Stderr, "  setup          --email --password --domain  (creates user + domain + membership)")
+		fmt.Fprintln(os.Stderr, "  create-user    -e/--email -p/--password -n/--name [-s/--super-admin]")
+		fmt.Fprintln(os.Stderr, "  create-domain  -n/--name [-t/--postmark-token]")
+		fmt.Fprintln(os.Stderr, "  add-member     -d/--domain-id -u/--user-id -r/--role [admin|user|readonly]")
+		fmt.Fprintln(os.Stderr, "  reset-password -e/--email -p/--password")
+		fmt.Fprintln(os.Stderr, "  setup          -e/--email -p/--password -d/--domain -n/--name  (creates user + domain + membership)")
 		os.Exit(1)
 	}
 	// Load .env file if present so CLI users don't need to manually export vars.
@@ -79,11 +79,11 @@ func main() {
 }
 
 func cmdCreateUser(ctx context.Context, pool *pgxpool.Pool, authSvc *auth.Service) int {
-	fs := flag.NewFlagSet("create-user", flag.ExitOnError)
-	email := fs.String("email", "", "User email address")
-	password := fs.String("password", "", "User password")
-	displayName := fs.String("name", "", "Display name")
-	superAdmin := fs.Bool("super-admin", false, "Grant super-admin privileges")
+	fs := pflag.NewFlagSet("create-user", pflag.ExitOnError)
+	email := fs.StringP("email", "e", "", "User email address")
+	password := fs.StringP("password", "p", "", "User password")
+	displayName := fs.StringP("name", "n", "", "Display name")
+	superAdmin := fs.BoolP("super-admin", "s", false, "Grant super-admin privileges")
 	fs.Parse(os.Args[2:])
 
 	if *email == "" || *password == "" {
@@ -113,9 +113,9 @@ func cmdCreateUser(ctx context.Context, pool *pgxpool.Pool, authSvc *auth.Servic
 }
 
 func cmdResetPassword(ctx context.Context, pool *pgxpool.Pool, authSvc *auth.Service) int {
-	fs := flag.NewFlagSet("reset-password", flag.ExitOnError)
-	email := fs.String("email", "", "User email address")
-	password := fs.String("password", "", "New password")
+	fs := pflag.NewFlagSet("reset-password", pflag.ExitOnError)
+	email := fs.StringP("email", "e", "", "User email address")
+	password := fs.StringP("password", "p", "", "New password")
 	fs.Parse(os.Args[2:])
 
 	if *email == "" || *password == "" {
@@ -140,9 +140,9 @@ func cmdResetPassword(ctx context.Context, pool *pgxpool.Pool, authSvc *auth.Ser
 }
 
 func cmdCreateDomain(ctx context.Context, pool *pgxpool.Pool) int {
-	fs := flag.NewFlagSet("create-domain", flag.ExitOnError)
-	name := fs.String("name", "", "Domain name (e.g. example.com)")
-	postmarkToken := fs.String("postmark-token", "", "Postmark server API token (optional)")
+	fs := pflag.NewFlagSet("create-domain", pflag.ExitOnError)
+	name := fs.StringP("name", "n", "", "Domain name (e.g. example.com)")
+	postmarkToken := fs.StringP("postmark-token", "t", "", "Postmark server API token (optional)")
 	fs.Parse(os.Args[2:])
 
 	if *name == "" {
@@ -174,10 +174,10 @@ func cmdCreateDomain(ctx context.Context, pool *pgxpool.Pool) int {
 }
 
 func cmdAddMember(ctx context.Context, pool *pgxpool.Pool) int {
-	fs := flag.NewFlagSet("add-member", flag.ExitOnError)
-	domainIDStr := fs.String("domain-id", "", "Domain UUID")
-	userIDStr := fs.String("user-id", "", "User UUID")
-	role := fs.String("role", "user", "Role: admin, user, or readonly")
+	fs := pflag.NewFlagSet("add-member", pflag.ExitOnError)
+	domainIDStr := fs.StringP("domain-id", "d", "", "Domain UUID")
+	userIDStr := fs.StringP("user-id", "u", "", "User UUID")
+	role := fs.StringP("role", "r", "user", "Role: admin, user, or readonly")
 	fs.Parse(os.Args[2:])
 
 	if *domainIDStr == "" || *userIDStr == "" {
@@ -220,11 +220,11 @@ func cmdAddMember(ctx context.Context, pool *pgxpool.Pool) int {
 }
 
 func cmdSetup(ctx context.Context, pool *pgxpool.Pool, authSvc *auth.Service) int {
-	fs := flag.NewFlagSet("setup", flag.ExitOnError)
-	email := fs.String("email", "", "Admin email address")
-	password := fs.String("password", "", "Admin password")
-	domainName := fs.String("domain", "", "Domain name (e.g. example.com)")
-	displayName := fs.String("name", "Admin", "Display name")
+	fs := pflag.NewFlagSet("setup", pflag.ExitOnError)
+	email := fs.StringP("email", "e", "", "Admin email address")
+	password := fs.StringP("password", "p", "", "Admin password")
+	domainName := fs.StringP("domain", "d", "", "Domain name (e.g. example.com)")
+	displayName := fs.StringP("name", "n", "Admin", "Display name")
 	fs.Parse(os.Args[2:])
 
 	if *email == "" || *password == "" || *domainName == "" {

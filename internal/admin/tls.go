@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ type TLSManager interface {
 	Status() certmanager.Status
 	Reload(cfg certmanager.Config) error
 	ForceRenew() error
+	RenewStatus() (inProgress bool, lastErr error)
 }
 
 // WithTLS attaches the certificate manager and credential cipher so the TLS
@@ -39,6 +41,7 @@ func (h *Handler) registerTLSRoutes(r chi.Router) {
 	r.Post("/admin/api/v1/tls/domains", h.addTLSDomain)
 	r.Delete("/admin/api/v1/tls/domains/{id}", h.deleteTLSDomain)
 	r.Post("/admin/api/v1/tls/renew", h.renewTLS)
+	r.Get("/admin/api/v1/tls/renew/status", h.renewTLSStatus)
 }
 
 var errTLSUnavailable = &api.AppError{
@@ -136,7 +139,7 @@ func (h *Handler) putTLSConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Empty submitted value preserves the stored secret (write-only fields).
 	for k, v := range req.Credentials {
-		if v != "" {
+		if v = strings.TrimSpace(v); v != "" {
 			current[k] = v
 		}
 	}
@@ -235,7 +238,18 @@ func (h *Handler) renewTLS(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"renewed": true})
 }
 
-// applyTLSReload re-reads DB config and reloads the manager. The reload
+func (h *Handler) renewTLSStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.tlsReady() {
+		api.WriteError(w, errTLSUnavailable)
+		return
+	}
+	inProgress, lastErr := h.certMgr.RenewStatus()
+	st := map[string]any{"renewing": inProgress}
+	if lastErr != nil {
+		st["last_error"] = lastErr.Error()
+	}
+	writeJSON(w, http.StatusOK, st)
+}
 // closure is supplied by main.go where DB access + cipher live.
 func (h *Handler) applyTLSReload() error {
 	if h.tlsReload == nil {

@@ -288,6 +288,11 @@ export async function renewTLS() {
   return res.data
 }
 
+export async function getTLSRenewStatus() {
+  const res = await api.get('/admin/api/v1/tls/renew/status', { baseURL: '' })
+  return res.data
+}
+
 export async function getContacts() {
   const res = await api.get('/contacts')
   return res.data.contacts || []

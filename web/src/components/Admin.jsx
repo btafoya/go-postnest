@@ -10,7 +10,7 @@ import {
   addUserDomain, updateUserDomainRole, removeUserDomain,
   listAliases, createAlias, deleteAlias, setDomainCatchall,
   getTLSStatus, getTLSProviders, getTLSConfig, updateTLSConfig,
-  getTLSDomains, addTLSDomain, deleteTLSDomain, renewTLS,
+  getTLSDomains, addTLSDomain, deleteTLSDomain, renewTLS, getTLSRenewStatus,
 } from '../api'
 
 const ROLES = ['admin', 'user', 'readonly']
@@ -168,15 +168,24 @@ export default function Admin() {
   const forceRenewHandler = async () => {
     if (!window.confirm('Force certificate renewal now?')) return
     setTlsBusy(true)
-    setError('')
+    setError('Renewal in progress…')
     try {
       await renewTLS()
-      setError('Certificate renewed')
-      fetchTLS()
+      const poll = setInterval(async () => {
+        const st = await getTLSRenewStatus()
+        if (st.renewing) return
+        clearInterval(poll)
+        setTlsBusy(false)
+        if (st.last_error) {
+          setError(st.last_error)
+        } else {
+          setError('Certificate renewed')
+          fetchTLS()
+        }
+      }, 2000)
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Renewal failed')
-    } finally {
       setTlsBusy(false)
+      setError(err.response?.data?.error?.message || 'Renewal failed')
     }
   }
 

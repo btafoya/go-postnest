@@ -98,6 +98,10 @@ type Manager struct {
 
 	current atomic.Pointer[tls.Certificate]
 
+	renewing    atomic.Bool
+	lastRenewMu sync.Mutex
+	lastRenewErr error
+
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
@@ -171,21 +175,39 @@ func (m *Manager) applyConfig(cfg Config) error {
 	}
 	user := &User{Email: cfg.Email, key: key}
 
-	legoCfg := lego.NewConfig(user)
-	legoCfg.CADirURL = caDirURL
-	legoCfg.Certificate.KeyType = certcrypto.EC256
+	newLegoClient := func(u *User) (*lego.Client, error) {
+		lc := lego.NewConfig(u)
+		lc.CADirURL = caDirURL
+		lc.Certificate.KeyType = certcrypto.EC256
+		return lego.NewClient(lc)
+	}
 
-	client, err := lego.NewClient(legoCfg)
+	// Phase 1: a client with no registration. lego bakes the JWS Key ID
+	// into the API core at construction time from User.GetRegistration(),
+	// so a client built before the account is resolved signs every request
+	// with the JWK instead of the kid. That is only valid for new-account;
+	// new-order is then rejected with "No Key ID in JWS header". This
+	// bootstrap client is used solely for account registration/resolution,
+	// which authenticate via JWK.
+	bootClient, err := newLegoClient(user)
 	if err != nil {
 		return fmt.Errorf("create lego client: %w", err)
 	}
-	m.client = client
 
-	reg, err := m.loadOrCreateRegistration(user)
+	reg, err := m.loadOrCreateRegistration(bootClient)
 	if err != nil {
 		return fmt.Errorf("load or create ACME registration: %w", err)
 	}
 	user.Registration = reg
+
+	// Phase 2: rebuild the client now that the user carries a registration
+	// so lego binds the account URL as the JWS Key ID for all subsequent
+	// requests (new-order, finalize, etc.).
+	client, err := newLegoClient(user)
+	if err != nil {
+		return fmt.Errorf("create lego client: %w", err)
+	}
+	m.client = client
 	m.user = user
 
 	provider, err := BuildProvider(cfg.DNSProvider, cfg.DNSCredentials)
@@ -334,9 +356,30 @@ func (m *Manager) Status() Status {
 	return st
 }
 
-// ForceRenew obtains a fresh certificate regardless of expiry.
+// ForceRenew starts an asynchronous certificate renewal and returns immediately.
+// Poll RenewStatus to observe progress and the final result.
 func (m *Manager) ForceRenew() error {
-	return m.obtainCertificate()
+	if !m.renewing.CompareAndSwap(false, true) {
+		return fmt.Errorf("certificate renewal already in progress")
+	}
+	go func() {
+		defer m.renewing.Store(false)
+		err := m.obtainCertificate()
+		m.lastRenewMu.Lock()
+		m.lastRenewErr = err
+		m.lastRenewMu.Unlock()
+	}()
+	return nil
+}
+
+// RenewStatus reports whether a renewal is currently in-flight and the error
+// from the most recent attempt (nil if it succeeded or never ran).
+func (m *Manager) RenewStatus() (inProgress bool, lastErr error) {
+	inProgress = m.renewing.Load()
+	m.lastRenewMu.Lock()
+	lastErr = m.lastRenewErr
+	m.lastRenewMu.Unlock()
+	return inProgress, lastErr
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +426,7 @@ func (m *Manager) loadOrCreateAccountKey() (crypto.PrivateKey, error) {
 	return privateKey, nil
 }
 
-func (m *Manager) loadOrCreateRegistration(user *User) (*registration.Resource, error) {
+func (m *Manager) loadOrCreateRegistration(client *lego.Client) (*registration.Resource, error) {
 	regPath := filepath.Join(m.accountDir, "account.json")
 
 	data, err := os.ReadFile(regPath)
@@ -394,7 +437,7 @@ func (m *Manager) loadOrCreateRegistration(user *User) (*registration.Resource, 
 		}
 	}
 
-	reg, err := m.client.Registration.Register(registration.RegisterOptions{
+	reg, err := client.Registration.Register(registration.RegisterOptions{
 		TermsOfServiceAgreed: true,
 	})
 	if err != nil {

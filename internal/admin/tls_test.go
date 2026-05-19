@@ -26,6 +26,7 @@ func (m *mockTLSMgr) Status() certmanager.Status {
 }
 func (m *mockTLSMgr) Reload(cfg certmanager.Config) error { m.reloadCalls++; return m.reloadErr }
 func (m *mockTLSMgr) ForceRenew() error                   { m.renewCalls++; return nil }
+func (m *mockTLSMgr) RenewStatus() (bool, error)          { return false, nil }
 
 func testCipher(t *testing.T) *crypto.Cipher {
 	t.Helper()
