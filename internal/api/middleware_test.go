@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/go-postnest/postnest/internal/models"
 )
 
 func TestCORS_AllowedOrigin(t *testing.T) {
@@ -103,6 +106,57 @@ func TestRecovery_RecoversPanic(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "internal_error") {
 		t.Errorf("body = %q, expected internal_error", rr.Body.String())
+	}
+}
+
+func TestRequireSuperAdmin_NoUser(t *testing.T) {
+	h := RequireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/v1/domains/x", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestRequireSuperAdmin_NonSuperAdminForbidden(t *testing.T) {
+	called := false
+	h := RequireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	user := &models.User{ID: uuid.Must(uuid.NewV7()), IsSuperAdmin: false}
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/v1/domains/x", nil)
+	req = req.WithContext(WithUser(req.Context(), user))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+	if called {
+		t.Error("handler ran for non-super-admin")
+	}
+}
+
+func TestRequireSuperAdmin_SuperAdminAllowed(t *testing.T) {
+	h := RequireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	user := &models.User{ID: uuid.Must(uuid.NewV7()), IsSuperAdmin: true}
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/v1/domains/x", nil)
+	req = req.WithContext(WithUser(req.Context(), user))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 }
 

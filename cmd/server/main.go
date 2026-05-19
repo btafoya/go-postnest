@@ -130,7 +130,7 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireSession(authService))
 		r.Use(api.CSRF)
-		r.Use(api.RequireDomainAdmin(authService))
+		r.Use(api.RequireSuperAdmin)
 		adminHandler.RegisterRoutes(r)
 		healthHandler.RegisterRoutes(r)
 	})

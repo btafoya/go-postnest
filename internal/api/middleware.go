@@ -171,6 +171,24 @@ func RequireDomainAdmin(svc *auth.Service) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireSuperAdmin ensures the user is a super admin. The admin console
+// (domains, users, settings, health) is a system-wide surface with no
+// per-domain scope, so authorization is global rather than domain-scoped.
+func RequireSuperAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := UserFromContext(r.Context())
+		if user == nil {
+			WriteError(w, ErrUnauthorized)
+			return
+		}
+		if !user.IsSuperAdmin {
+			WriteError(w, ErrForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // extractToken pulls the bearer token from Authorization header or Cookie.
 func extractToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
