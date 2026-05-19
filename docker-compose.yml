@@ -42,7 +42,6 @@ services:
       POSTNEST_SECURITY_ALLOW_INSECURE_AUTH: ${POSTNEST_SECURITY_ALLOW_INSECURE_AUTH:-true}
       POSTNEST_SECURITY_SECRET_KEY: ${POSTNEST_SECRET_KEY:-}
     ports:
-      - "8181:8080"
       - "143:143"
       - "587:587"
     depends_on:
