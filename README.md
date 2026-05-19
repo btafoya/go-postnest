@@ -72,7 +72,6 @@ export POSTNEST_CONFIG_PATH="/etc/postnest/postnest.conf"
 export POSTNEST_DATABASE_DSN="postgres://user:pass@localhost:5432/postnest?sslmode=disable"
 export POSTNEST_REDIS_URL="redis://localhost:6379/0"
 export POSTNEST_SECURITY_SESSION_KEY="change-me-in-production"
-export POSTNEST_POSTMARK_WEBHOOK_SECRET="your-postmark-secret"
 
 go run ./cmd/server
 ```
@@ -90,6 +89,33 @@ export POSTNEST_SECURITY_SESSION_KEY="change-me-in-production"
 
 go run ./cmd/worker
 ```
+
+### Postmark Inbound Webhook
+
+Configure Postmark to forward inbound mail to your PostNest instance.
+
+1. In Postmark, open your server and enable **Inbound**.
+2. Set the **Inbound Webhook URL** to:
+
+```
+https://mail.premadev.com/webhooks/postmark/inbound
+```
+
+3. For each domain, copy the Postmark **Server API Token** into PostNest:
+
+```bash
+# Create the domain with its token
+docker compose exec server postnest-admin create-domain \
+  -n example.com -t "your-server-api-token"
+```
+
+Or update an existing domain directly:
+
+```sql
+UPDATE domains SET postmark_token = 'your-server-api-token' WHERE name = 'example.com';
+```
+
+Postmark inbound webhooks send the Server API Token in the `X-Postmark-Server-Token` header. PostNest looks up the token by extracting the recipient domain from the webhook payload (`OriginalRecipient` or `To`) and verifying it against the stored token for that domain. Inbound mail hits the endpoint, gets parsed by the worker, and stored in PostgreSQL.
 
 ### TLS (Optional)
 
@@ -144,7 +170,6 @@ Legacy variable names (e.g., `POSTGRES_DSN`, `SESSION_KEY`) are also supported f
 | `POSTNEST_REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
 | `POSTNEST_SECURITY_SESSION_KEY` | — | Secret key for session signing |
 | `POSTNEST_SECURITY_SESSION_EXPIRY` | `168h` | Session duration |
-| `POSTNEST_POSTMARK_WEBHOOK_SECRET` | — | Postmark webhook signature secret |
 | `POSTNEST_WORKER_CONCURRENCY` | `10` | Number of concurrent worker goroutines |
 | `POSTNEST_WORKER_POLL_INTERVAL` | `5s` | Redis job polling interval |
 | `POSTNEST_SECURITY_MAX_MESSAGE_SIZE` | `52428800` (50MB) | Maximum incoming message size |

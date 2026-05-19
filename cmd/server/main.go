@@ -62,7 +62,7 @@ func main() {
 	_ = postmarkClient
 
 	webmailHandler := webmail.NewHandler(mailStore, authService, redisClient, cfg.MaxAttachmentSize)
-	webhookHandler := webhook.NewHandler(redisClient, cfg.PostmarkWebhookSecret)
+	webhookHandler := webhook.NewHandler(redisClient, pgPool.Pool)
 
 	adminStore := admin.NewPGStore(pgPool.Pool)
 	settingsCache := admin.NewSettingsCache(adminStore, 30*time.Second)

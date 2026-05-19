@@ -47,9 +47,6 @@ type Config struct {
 	SessionKey      string        `env:"SESSION_KEY"`
 	SessionExpiry   time.Duration `env:"SESSION_EXPIRY" envDefault:"168h"`
 
-	// Postmark
-	PostmarkWebhookSecret string `env:"POSTMARK_WEBHOOK_SECRET"`
-
 	// Workers
 	WorkerConcurrency  int           `env:"WORKER_CONCURRENCY" envDefault:"10"`
 	WorkerPollInterval time.Duration `env:"WORKER_POLL_INTERVAL" envDefault:"5s"`

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,17 +16,18 @@ import (
 	"github.com/go-postnest/postnest/internal/redis"
 	"github.com/go-postnest/postnest/internal/workers"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Handler receives Postmark webhooks.
 type Handler struct {
-	redis  *redis.Client
-	secret string
+	redis *redis.Client
+	db    *pgxpool.Pool
 }
 
 // NewHandler creates a webhook handler.
-func NewHandler(r *redis.Client, secret string) *Handler {
-	return &Handler{redis: r, secret: secret}
+func NewHandler(r *redis.Client, db *pgxpool.Pool) *Handler {
+	return &Handler{redis: r, db: db}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
@@ -45,21 +47,57 @@ func readBody(r *http.Request) ([]byte, error) {
 	return body, nil
 }
 
-// verifySignature checks the HMAC-SHA256 signature of the request body.
-// Postmark sends the signature in X-Postmark-Signature header.
-// Falls back to X-Postmark-Server-Token comparison if signature header is absent.
-func (h *Handler) verifySignature(body []byte, r *http.Request) bool {
+// extractDomain pulls the domain from an email address string.
+func extractDomain(email string) string {
+	if i := strings.LastIndex(email, "@"); i >= 0 && i < len(email)-1 {
+		return strings.ToLower(email[i+1:])
+	}
+	return ""
+}
+
+// getDomainFromPayload extracts the recipient domain based on webhook type.
+func getDomainFromPayload(payload map[string]any, eventType string) string {
+	switch eventType {
+	case "inbound":
+		if v, ok := payload["OriginalRecipient"].(string); ok {
+			return extractDomain(v)
+		}
+		if v, ok := payload["To"].(string); ok {
+			return extractDomain(v)
+		}
+	case "bounce", "delivery", "spam":
+		if v, ok := payload["Recipient"].(string); ok {
+			return extractDomain(v)
+		}
+	}
+	return ""
+}
+
+// verifySignature checks the webhook request against the domain's stored Postmark token.
+// Postmark sends the Server API Token in the X-Postmark-Server-Token header.
+func (h *Handler) verifySignature(ctx context.Context, domain string, body []byte, r *http.Request) bool {
+	if domain == "" {
+		return false
+	}
+
+	// Look up the domain's stored token.
+	var token string
+	err := h.db.QueryRow(ctx, `SELECT COALESCE(postmark_token,'') FROM domains WHERE name=$1`, domain).Scan(&token)
+	if err != nil || token == "" {
+		return false
+	}
+
 	// Prefer HMAC-SHA256 signature verification.
-	if sig := r.Header.Get("X-Postmark-Signature"); sig != "" && h.secret != "" {
-		mac := hmac.New(sha256.New, []byte(h.secret))
+	if sig := r.Header.Get("X-Postmark-Signature"); sig != "" {
+		mac := hmac.New(sha256.New, []byte(token))
 		mac.Write(body)
 		expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 		return hmac.Equal([]byte(expected), []byte(sig))
 	}
 
-	// Fallback to legacy token check.
-	token := r.Header.Get("X-Postmark-Server-Token")
-	return token != "" && token == h.secret
+	// Fallback to Server API Token header.
+	tok := r.Header.Get("X-Postmark-Server-Token")
+	return tok != "" && tok == token
 }
 
 func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -68,16 +106,19 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if !h.verifySignature(body, r) {
-		api.WriteError(w, api.ErrUnauthorized)
-		return
-	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+
+	domain := getDomainFromPayload(payload, "inbound")
+	if !h.verifySignature(r.Context(), domain, body, r) {
+		api.WriteError(w, api.ErrUnauthorized)
+		return
+	}
+
 	if !h.dedup(r.Context(), payload) {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -95,16 +136,19 @@ func (h *Handler) handleBounce(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if !h.verifySignature(body, r) {
-		api.WriteError(w, api.ErrUnauthorized)
-		return
-	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+
+	domain := getDomainFromPayload(payload, "bounce")
+	if !h.verifySignature(r.Context(), domain, body, r) {
+		api.WriteError(w, api.ErrUnauthorized)
+		return
+	}
+
 	if !h.dedup(r.Context(), payload) {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -122,16 +166,19 @@ func (h *Handler) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if !h.verifySignature(body, r) {
-		api.WriteError(w, api.ErrUnauthorized)
-		return
-	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+
+	domain := getDomainFromPayload(payload, "delivery")
+	if !h.verifySignature(r.Context(), domain, body, r) {
+		api.WriteError(w, api.ErrUnauthorized)
+		return
+	}
+
 	if !h.dedup(r.Context(), payload) {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -149,16 +196,19 @@ func (h *Handler) handleSpam(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
-	if !h.verifySignature(body, r) {
-		api.WriteError(w, api.ErrUnauthorized)
-		return
-	}
 
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		api.WriteError(w, api.ErrValidation)
 		return
 	}
+
+	domain := getDomainFromPayload(payload, "spam")
+	if !h.verifySignature(r.Context(), domain, body, r) {
+		api.WriteError(w, api.ErrUnauthorized)
+		return
+	}
+
 	if !h.dedup(r.Context(), payload) {
 		w.WriteHeader(http.StatusOK)
 		return

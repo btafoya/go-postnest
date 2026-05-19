@@ -19,7 +19,6 @@ type rawConfig struct {
 	Server        rawServer   `toml:"server"`
 	Database      rawDatabase `toml:"database"`
 	Redis         rawRedis    `toml:"redis"`
-	Postmark      rawPostmark `toml:"postmark"`
 	TLS           rawTLS      `toml:"tls"`
 	Worker        rawWorker   `toml:"worker"`
 	Security      rawSecurity `toml:"security"`
@@ -44,10 +43,6 @@ type rawDatabase struct {
 
 type rawRedis struct {
 	URL string `toml:"url"`
-}
-
-type rawPostmark struct {
-	WebhookSecret string `toml:"webhook_secret"`
 }
 
 type rawTLS struct {
@@ -173,7 +168,6 @@ func (l *Loader) Load() (*Config, error) {
 		Argon2idThreads:       raw.Security.Argon2idThreads,
 		SessionKey:            raw.Security.SessionKey,
 		SessionExpiry:         raw.Security.SessionExpiry,
-		PostmarkWebhookSecret: raw.Postmark.WebhookSecret,
 		WorkerConcurrency:     raw.Worker.Concurrency,
 		WorkerPollInterval:    raw.Worker.PollInterval,
 		MaxMessageSize:        raw.Security.MaxMessageSize,
@@ -290,7 +284,6 @@ func legacyEnv(newKey string) string {
 		"POSTNEST_SECURITY_ARGON2ID_THREADS":    "ARGON2ID_THREADS",
 		"POSTNEST_SECURITY_SESSION_KEY":         "SESSION_KEY",
 		"POSTNEST_SECURITY_SESSION_EXPIRY":      "SESSION_EXPIRY",
-		"POSTNEST_POSTMARK_WEBHOOK_SECRET":      "POSTMARK_WEBHOOK_SECRET",
 		"POSTNEST_WORKER_CONCURRENCY":           "WORKER_CONCURRENCY",
 		"POSTNEST_WORKER_POLL_INTERVAL":         "WORKER_POLL_INTERVAL",
 		"POSTNEST_SECURITY_MAX_MESSAGE_SIZE":    "MAX_MESSAGE_SIZE",

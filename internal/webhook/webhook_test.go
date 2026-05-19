@@ -12,7 +12,7 @@ import (
 func TestDedup_NewMessage(t *testing.T) {
 	m := miniredis.RunT(t)
 	c, _ := redis.New("redis://" + m.Addr())
-	h := &Handler{redis: c, secret: "test"}
+	h := &Handler{redis: c}
 
 	payload := map[string]any{"MessageID": "msg-123"}
 	if !h.dedup(context.Background(), payload) {
@@ -23,7 +23,7 @@ func TestDedup_NewMessage(t *testing.T) {
 func TestDedup_DuplicateMessage(t *testing.T) {
 	m := miniredis.RunT(t)
 	c, _ := redis.New("redis://" + m.Addr())
-	h := &Handler{redis: c, secret: "test"}
+	h := &Handler{redis: c}
 
 	payload := map[string]any{"MessageID": "msg-456"}
 	if !h.dedup(context.Background(), payload) {
@@ -37,7 +37,7 @@ func TestDedup_DuplicateMessage(t *testing.T) {
 func TestDedup_NoMessageID(t *testing.T) {
 	m := miniredis.RunT(t)
 	c, _ := redis.New("redis://" + m.Addr())
-	h := &Handler{redis: c, secret: "test"}
+	h := &Handler{redis: c}
 
 	payload := map[string]any{"Other": "value"}
 	if !h.dedup(context.Background(), payload) {
@@ -48,7 +48,7 @@ func TestDedup_NoMessageID(t *testing.T) {
 func TestDedup_TTLEviction(t *testing.T) {
 	m := miniredis.RunT(t)
 	c, _ := redis.New("redis://" + m.Addr())
-	h := &Handler{redis: c, secret: "test"}
+	h := &Handler{redis: c}
 
 	payload := map[string]any{"MessageID": "msg-ttl"}
 	_ = h.dedup(context.Background(), payload)
