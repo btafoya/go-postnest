@@ -69,6 +69,7 @@ type rawSecurity struct {
 	MaxMessageSize    int64         `toml:"max_message_size"`
 	MaxAttachmentSize int64         `toml:"max_attachment_size"`
 	AllowInsecureAuth bool          `toml:"allow_insecure_auth"`
+	SecretKey         string        `toml:"secret_key"`
 }
 
 type rawACME struct {
@@ -178,6 +179,7 @@ func (l *Loader) Load() (*Config, error) {
 		MaxMessageSize:        raw.Security.MaxMessageSize,
 		MaxAttachmentSize:     raw.Security.MaxAttachmentSize,
 		AllowInsecureAuth:     raw.Security.AllowInsecureAuth,
+		SecretKey:             raw.Security.SecretKey,
 		ACMEEnabled:           raw.ACME.Enabled,
 		ACMEEmail:             raw.ACME.Email,
 		ACMEDomain:            raw.ACME.Domain,
@@ -294,6 +296,7 @@ func legacyEnv(newKey string) string {
 		"POSTNEST_SECURITY_MAX_MESSAGE_SIZE":    "MAX_MESSAGE_SIZE",
 		"POSTNEST_SECURITY_MAX_ATTACHMENT_SIZE": "MAX_ATTACHMENT_SIZE",
 		"POSTNEST_SECURITY_ALLOW_INSECURE_AUTH": "ALLOW_INSECURE_AUTH",
+		"POSTNEST_SECURITY_SECRET_KEY":          "POSTNEST_SECRET_KEY",
 	}
 	if old, ok := legacy[newKey]; ok {
 		return os.Getenv(old)

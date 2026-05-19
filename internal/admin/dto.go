@@ -13,10 +13,11 @@ type domainDTO struct {
 	Name           string    `json:"name"`
 	PostmarkToken  string    `json:"postmark_token"`
 	PostmarkStream string    `json:"postmark_stream"`
-	IsActive       bool      `json:"is_active"`
-	UserCount      int64     `json:"user_count"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	IsActive       bool       `json:"is_active"`
+	UserCount      int64      `json:"user_count"`
+	CatchallUserID *uuid.UUID `json:"catchall_user_id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // membershipDTO is the JSON contract for a domain membership.
@@ -37,6 +38,43 @@ type userDTO struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
+// aliasTargetDTO is the JSON contract for an alias target user.
+type aliasTargetDTO struct {
+	UserID    uuid.UUID `json:"user_id"`
+	UserEmail string    `json:"user_email"`
+}
+
+// aliasDTO is the JSON contract for a domain alias.
+type aliasDTO struct {
+	ID        uuid.UUID        `json:"id"`
+	DomainID  uuid.UUID        `json:"domain_id"`
+	LocalPart string           `json:"local_part"`
+	Targets   []aliasTargetDTO `json:"targets"`
+	CreatedAt time.Time        `json:"created_at"`
+}
+
+func toAliasDTO(a *models.Alias) aliasDTO {
+	targets := make([]aliasTargetDTO, 0, len(a.Targets))
+	for _, t := range a.Targets {
+		targets = append(targets, aliasTargetDTO{UserID: t.UserID, UserEmail: t.UserEmail})
+	}
+	return aliasDTO{
+		ID:        a.ID,
+		DomainID:  a.DomainID,
+		LocalPart: a.LocalPart,
+		Targets:   targets,
+		CreatedAt: a.CreatedAt,
+	}
+}
+
+func toAliasDTOs(aliases []*models.Alias) []aliasDTO {
+	out := make([]aliasDTO, 0, len(aliases))
+	for _, a := range aliases {
+		out = append(out, toAliasDTO(a))
+	}
+	return out
+}
+
 func toDomainDTO(r *DomainRow) domainDTO {
 	return domainDTO{
 		ID:             r.ID,
@@ -45,6 +83,7 @@ func toDomainDTO(r *DomainRow) domainDTO {
 		PostmarkStream: r.PostmarkStream,
 		IsActive:       r.IsActive,
 		UserCount:      r.UserCount,
+		CatchallUserID: r.CatchallUserID,
 		CreatedAt:      r.CreatedAt,
 		UpdatedAt:      r.UpdatedAt,
 	}

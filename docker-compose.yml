@@ -40,6 +40,7 @@ services:
       POSTNEST_TLS_CERT_PATH: ${POSTNEST_TLS_CERT_PATH:-}
       POSTNEST_TLS_KEY_PATH: ${POSTNEST_TLS_KEY_PATH:-}
       POSTNEST_SECURITY_ALLOW_INSECURE_AUTH: ${POSTNEST_SECURITY_ALLOW_INSECURE_AUTH:-true}
+      POSTNEST_SECURITY_SECRET_KEY: ${POSTNEST_SECRET_KEY:-}
     ports:
       - "8080:8080"
       - "143:143"
@@ -54,6 +55,7 @@ services:
     volumes:
       - ${POSTNEST_TLS_CERT_PATH:-/dev/null}:/etc/postnest/tls.crt:ro
       - ${POSTNEST_TLS_KEY_PATH:-/dev/null}:/etc/postnest/tls.key:ro
+      - certs_data:/var/lib/postnest/certs
 
   webui:
     build:
@@ -101,3 +103,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  certs_data:

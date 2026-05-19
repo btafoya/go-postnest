@@ -42,6 +42,18 @@ type mockStore struct {
 	updateMemberErr   error
 	removeMemberErr   error
 	lastAddRole       string
+	aliases           []*models.Alias
+	createAliasErr    error
+	setTargetsErr     error
+	deleteAliasErr    error
+	catchallErr       error
+	lastCatchallUser  *uuid.UUID
+	acmeConfig        *ACMEConfigRow
+	acmeDomains       []ACMEDomainRow
+	getACMEConfigErr  error
+	setACMEConfigErr  error
+	addACMEDomainErr  error
+	lastSetACMECreds  string
 }
 
 func (m *mockStore) ListDomains(ctx context.Context, limit, offset int) ([]*DomainRow, int64, error) {
@@ -139,6 +151,37 @@ func (m *mockStore) RemoveMember(ctx context.Context, userID, domainID uuid.UUID
 	return m.removeMemberErr
 }
 
+func (m *mockStore) ListAliases(ctx context.Context, domainID uuid.UUID) ([]*models.Alias, error) {
+	return m.aliases, nil
+}
+
+func (m *mockStore) CreateAlias(ctx context.Context, domainID uuid.UUID, localPart string, userIDs []uuid.UUID) (*models.Alias, error) {
+	if m.createAliasErr != nil {
+		return nil, m.createAliasErr
+	}
+	a := &models.Alias{ID: uuid.Must(uuid.NewV7()), DomainID: domainID, LocalPart: localPart, CreatedAt: time.Now().UTC()}
+	for _, uid := range userIDs {
+		a.Targets = append(a.Targets, models.AliasTarget{AliasID: a.ID, UserID: uid})
+	}
+	return a, nil
+}
+
+func (m *mockStore) SetAliasTargets(ctx context.Context, aliasID uuid.UUID, userIDs []uuid.UUID) error {
+	return m.setTargetsErr
+}
+
+func (m *mockStore) DeleteAlias(ctx context.Context, aliasID uuid.UUID) error {
+	return m.deleteAliasErr
+}
+
+func (m *mockStore) SetDomainCatchall(ctx context.Context, domainID uuid.UUID, userID *uuid.UUID) error {
+	if m.catchallErr != nil {
+		return m.catchallErr
+	}
+	m.lastCatchallUser = userID
+	return nil
+}
+
 func (m *mockStore) GetSettings(ctx context.Context) (map[string]string, error) {
 	if m.getSettingsErr != nil {
 		return nil, m.getSettingsErr
@@ -155,6 +198,48 @@ func (m *mockStore) SetSetting(ctx context.Context, key, value string) error {
 	}
 	m.settings[key] = value
 	return nil
+}
+
+func (m *mockStore) GetACMEConfig(ctx context.Context) (*ACMEConfigRow, error) {
+	if m.getACMEConfigErr != nil {
+		return nil, m.getACMEConfigErr
+	}
+	if m.acmeConfig == nil {
+		return &ACMEConfigRow{Directory: "staging", DNSProvider: "cloudflare"}, nil
+	}
+	return m.acmeConfig, nil
+}
+
+func (m *mockStore) SetACMEConfig(ctx context.Context, enabled bool, email, directory, dnsProvider, credsEnc string) error {
+	if m.setACMEConfigErr != nil {
+		return m.setACMEConfigErr
+	}
+	m.lastSetACMECreds = credsEnc
+	m.acmeConfig = &ACMEConfigRow{Enabled: enabled, Email: email, Directory: directory, DNSProvider: dnsProvider, CredentialsEnc: credsEnc}
+	return nil
+}
+
+func (m *mockStore) ListACMEDomains(ctx context.Context) ([]ACMEDomainRow, error) {
+	return m.acmeDomains, nil
+}
+
+func (m *mockStore) AddACMEDomain(ctx context.Context, domain string) (*ACMEDomainRow, error) {
+	if m.addACMEDomainErr != nil {
+		return nil, m.addACMEDomainErr
+	}
+	d := ACMEDomainRow{ID: uuid.New(), Domain: domain}
+	m.acmeDomains = append(m.acmeDomains, d)
+	return &d, nil
+}
+
+func (m *mockStore) DeleteACMEDomain(ctx context.Context, id uuid.UUID) error {
+	for i, d := range m.acmeDomains {
+		if d.ID == id {
+			m.acmeDomains = append(m.acmeDomains[:i], m.acmeDomains[i+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func newTestHandler(store Store) *Handler {
@@ -1088,5 +1173,173 @@ func TestUpdateUser_ReturnsRealMemberships(t *testing.T) {
 	}
 	if mems[0].(map[string]any)["domain_name"] != "example.com" {
 		t.Errorf("domain_name = %v, want example.com", mems[0])
+	}
+}
+
+func TestCreateAlias_Success(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	domainID := uuid.Must(uuid.NewV7())
+	u1 := uuid.Must(uuid.NewV7())
+	u2 := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]any{"local_part": "sales", "user_ids": []string{u1.String(), u2.String()}})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/domains/"+domainID.String()+"/aliases", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	a, ok := resp["alias"].(map[string]any)
+	if !ok {
+		t.Fatal("expected alias key")
+	}
+	if a["local_part"] != "sales" {
+		t.Errorf("local_part = %v, want sales", a["local_part"])
+	}
+	targets, ok := a["targets"].([]any)
+	if !ok || len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %v", a["targets"])
+	}
+}
+
+func TestCreateAlias_NoTargets(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	domainID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]any{"local_part": "sales", "user_ids": []string{}})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/domains/"+domainID.String()+"/aliases", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
+func TestCreateAlias_Conflict(t *testing.T) {
+	store := &mockStore{createAliasErr: &pgconn.PgError{Code: pgerrcode.UniqueViolation}}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	domainID := uuid.Must(uuid.NewV7())
+	u1 := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]any{"local_part": "sales", "user_ids": []string{u1.String()}})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/domains/"+domainID.String()+"/aliases", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+}
+
+func TestListAliases_Success(t *testing.T) {
+	domainID := uuid.Must(uuid.NewV7())
+	store := &mockStore{
+		aliases: []*models.Alias{
+			{ID: uuid.Must(uuid.NewV7()), DomainID: domainID, LocalPart: "sales",
+				Targets: []models.AliasTarget{{UserID: uuid.Must(uuid.NewV7()), UserEmail: "a@x.com"}}},
+		},
+	}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/v1/domains/"+domainID.String()+"/aliases", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	aliases, ok := resp["aliases"].([]any)
+	if !ok || len(aliases) != 1 {
+		t.Fatalf("expected 1 alias, got %v", resp["aliases"])
+	}
+}
+
+func TestDeleteAlias_NotFound(t *testing.T) {
+	store := &mockStore{deleteAliasErr: ErrNotFound}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/v1/aliases/"+uuid.Must(uuid.NewV7()).String(), nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestSetAliasTargets_BadAliasID(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	body, _ := json.Marshal(map[string]any{"user_ids": []string{uuid.Must(uuid.NewV7()).String()}})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/aliases/not-a-uuid/targets", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestSetDomainCatchall_Success(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	domainID := uuid.Must(uuid.NewV7())
+	userID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]any{"user_id": userID.String()})
+	req := httptest.NewRequest(http.MethodPatch, "/admin/api/v1/domains/"+domainID.String()+"/catchall", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if store.lastCatchallUser == nil || *store.lastCatchallUser != userID {
+		t.Errorf("lastCatchallUser = %v, want %v", store.lastCatchallUser, userID)
+	}
+}
+
+func TestSetDomainCatchall_Clear(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	domainID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]any{"user_id": nil})
+	req := httptest.NewRequest(http.MethodPatch, "/admin/api/v1/domains/"+domainID.String()+"/catchall", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if store.lastCatchallUser != nil {
+		t.Errorf("lastCatchallUser = %v, want nil", store.lastCatchallUser)
 	}
 }

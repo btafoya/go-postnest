@@ -233,10 +233,35 @@ provider      = "cloudflare"  # extensible to other lego providers
 | `POSTNEST_ACME_CERT_DIR` | Storage directory |
 | `POSTNEST_ACME_RENEW_INTERVAL` | Check interval |
 | `POSTNEST_ACME_RENEW_BEFORE` | Renew threshold |
-| `POSTNEST_ACME_DNS_PROVIDER` | DNS provider name |
-| `CLOUDFLARE_DNS_API_TOKEN` | Cloudflare API token (read by lego provider) |
+| `POSTNEST_ACME_DNS_PROVIDER` | DNS provider name (bootstrap only) |
+| `POSTNEST_SECRET_KEY` | **Required when ACME enabled.** Base64-encoded 32-byte AES-256 key used to encrypt DNS provider credentials at rest. Generate with `openssl rand -base64 32`. |
 
-### 6.3 Backward Compatibility
+### 6.3 Runtime Configuration (DB-backed)
+
+ACME email, directory, DNS provider, DNS credentials, and the SAN domain
+list are persisted in the database (`acme_config`, `acme_domains`, migration
+`000010`) and managed at runtime from the admin UI (**Admin → TLS /
+Certificates**, super-admin only). Changes hot-reload the certificate
+manager; changing the domain set re-issues the SAN certificate.
+
+The `POSTNEST_ACME_*` env/TOML values are a **one-time bootstrap**: on first
+run with an empty `acme_config`, `POSTNEST_ACME_EMAIL` /
+`POSTNEST_ACME_DOMAIN` (comma-separated allowed) / `POSTNEST_ACME_DNS_PROVIDER`
+seed the DB. Thereafter the DB is authoritative. `POSTNEST_ACME_CERT_DIR`,
+`POSTNEST_ACME_RENEW_INTERVAL`, and `POSTNEST_ACME_RENEW_BEFORE` remain
+operational env settings (not exposed in the UI).
+
+**Certificate model:** a single SAN certificate covers all configured
+domains. **Supported DNS providers** (curated allowlist): `cloudflare`,
+`route53`, `digitalocean`, `gcloud`, `namesilo`. Each provider's required
+credential fields are described by the `/admin/api/v1/tls/providers`
+endpoint and rendered dynamically in the UI; secret fields are write-only
+(blank submission preserves the stored value, GET never returns plaintext).
+
+> **Key rotation:** changing `POSTNEST_SECRET_KEY` orphans previously
+> encrypted DNS credentials — they must be re-entered via the admin UI.
+
+### 6.4 Backward Compatibility
 
 - When `acme.enabled = false` (default), existing behavior is preserved:
   - If `tls.cert_path` / `tls.key_path` are provided, static TLS is used.

@@ -37,15 +37,18 @@ type mockMailCounter struct {
 
 func (m *mockMailCounter) CountMessagesToday(ctx context.Context) (int64, error) { return m.today, m.err }
 
+// emptyAddr is a reusable non-nil pointer to an empty listener address.
+var emptyAddr = func() *string { s := ""; return &s }()
+
 func TestHealthHandler_NewHealthHandler(t *testing.T) {
-	h := NewHealthHandler(nil, nil, "", "", nil, nil)
+	h := NewHealthHandler(nil, nil, emptyAddr, emptyAddr, nil, nil)
 	if h == nil {
 		t.Fatal("NewHealthHandler returned nil")
 	}
 }
 
 func TestHealthHandler_RegisterRoutes(t *testing.T) {
-	h := NewHealthHandler(nil, nil, "", "", nil, nil)
+	h := NewHealthHandler(nil, nil, emptyAddr, emptyAddr, nil, nil)
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
 
@@ -62,7 +65,7 @@ func TestHealthHandler_RegisterRoutes(t *testing.T) {
 }
 
 func TestHealthHandler_NilDepsDoesNotPanicOnRegister(t *testing.T) {
-	h := NewHealthHandler(nil, nil, "", "", nil, nil)
+	h := NewHealthHandler(nil, nil, emptyAddr, emptyAddr, nil, nil)
 	r := chi.NewRouter()
 	defer func() {
 		if r := recover(); r != nil {
@@ -94,8 +97,8 @@ func TestHealthHandler_Handle(t *testing.T) {
 	h := &HealthHandler{
 		pgPool:      pgPool,
 		redisClient: redisClient,
-		imapAddr:    "",
-		smtpAddr:    "",
+		imapAddr:    emptyAddr,
+		smtpAddr:    emptyAddr,
 		authService: authSvc,
 		mailStore:   mailSvc,
 	}
@@ -167,8 +170,8 @@ func TestHealthHandler_DatabaseDown(t *testing.T) {
 	h := &HealthHandler{
 		pgPool:      pgPool,
 		redisClient: redisClient,
-		imapAddr:    "",
-		smtpAddr:    "",
+		imapAddr:    emptyAddr,
+		smtpAddr:    emptyAddr,
 		authService: authSvc,
 		mailStore:   mailSvc,
 	}
@@ -218,8 +221,8 @@ func TestHealthHandler_RedisDown(t *testing.T) {
 	h := &HealthHandler{
 		pgPool:      pgPool,
 		redisClient: redisClient,
-		imapAddr:    "",
-		smtpAddr:    "",
+		imapAddr:    emptyAddr,
+		smtpAddr:    emptyAddr,
 		authService: authSvc,
 		mailStore:   mailSvc,
 	}
@@ -256,8 +259,8 @@ func TestHealthHandler_HandleWithNilPool(t *testing.T) {
 	h := &HealthHandler{
 		pgPool:      nil,
 		redisClient: redisClient,
-		imapAddr:    "",
-		smtpAddr:    "",
+		imapAddr:    emptyAddr,
+		smtpAddr:    emptyAddr,
 		authService: authSvc,
 		mailStore:   mailSvc,
 	}

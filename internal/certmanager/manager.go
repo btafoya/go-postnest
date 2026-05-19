@@ -16,6 +16,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,19 +26,38 @@ import (
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
-	"github.com/go-acme/lego/v4/providers/dns/cloudflare"
 	"github.com/go-acme/lego/v4/registration"
 )
 
-// Config holds ACME configuration.
+// Config holds ACME configuration. Domains are issued as a single SAN
+// certificate. DNSCredentials are already-decrypted provider credentials.
 type Config struct {
-	Email         string
-	Domain        string
-	Directory     string // "staging" or "production"
-	CertDir       string
-	DNSProvider   string
-	RenewInterval time.Duration
-	RenewBefore   time.Duration
+	Email          string
+	Domains        []string
+	Directory      string // "staging" or "production"
+	CertDir        string
+	DNSProvider    string
+	DNSCredentials map[string]string
+	RenewInterval  time.Duration
+	RenewBefore    time.Duration
+}
+
+func (c Config) normalizedDomains() []string {
+	d := make([]string, 0, len(c.Domains))
+	seen := make(map[string]struct{}, len(c.Domains))
+	for _, x := range c.Domains {
+		x = strings.ToLower(strings.TrimSpace(x))
+		if x == "" {
+			continue
+		}
+		if _, ok := seen[x]; ok {
+			continue
+		}
+		seen[x] = struct{}{}
+		d = append(d, x)
+	}
+	sort.Strings(d)
+	return d
 }
 
 // User implements registration.User interface.
@@ -50,10 +71,25 @@ func (u *User) GetEmail() string                        { return u.Email }
 func (u *User) GetRegistration() *registration.Resource { return u.Registration }
 func (u *User) GetPrivateKey() crypto.PrivateKey        { return u.key }
 
-// Manager handles ACME certificate lifecycle.
+// Status is an immutable snapshot of certificate state for the admin UI.
+type Status struct {
+	Domains       []string  `json:"domains"`
+	Issuer        string    `json:"issuer"`
+	NotBefore     time.Time `json:"not_before"`
+	NotAfter      time.Time `json:"not_after"`
+	DaysRemaining int       `json:"days_remaining"`
+	Directory     string    `json:"directory"`
+	DNSProvider   string    `json:"dns_provider"`
+	HasCert       bool      `json:"has_cert"`
+}
+
+// Manager handles ACME certificate lifecycle for a SAN certificate.
 type Manager struct {
+	logger *slog.Logger
+
+	mu         sync.RWMutex // guards cfg, client, user, paths, in-flight obtain
 	cfg        Config
-	logger     *slog.Logger
+	domains    []string
 	client     *lego.Client
 	user       *User
 	certPath   string
@@ -61,7 +97,6 @@ type Manager struct {
 	accountDir string
 
 	current atomic.Pointer[tls.Certificate]
-	mu      sync.RWMutex
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -69,14 +104,31 @@ type Manager struct {
 
 // NewManager creates a certificate manager. It validates configuration,
 // loads or generates the ACME account key, and prepares the lego client.
-// No network I/O is performed.
+// No network I/O is performed. An empty Config (no email) creates a manager
+// in disabled state that can be activated later via Reload.
 func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
+	m := &Manager{
+		logger: logger,
+		stopCh: make(chan struct{}),
+	}
+	if cfg.Email != "" {
+		if err := m.applyConfig(cfg); err != nil {
+			return nil, err
+		}
+	} else {
+		m.cfg = cfg
+	}
+	return m, nil
+}
+
+// applyConfig validates cfg, (re)builds the lego client, registration and
+// DNS provider, and recomputes cert/key paths. Caller must hold m.mu, or
+// call before the manager is shared (NewManager).
+func (m *Manager) applyConfig(cfg Config) error {
 	if cfg.Email == "" {
-		return nil, fmt.Errorf("ACME email is required")
+		return fmt.Errorf("ACME email is required")
 	}
-	if cfg.Domain == "" {
-		return nil, fmt.Errorf("ACME domain is required")
-	}
+	domains := cfg.normalizedDomains()
 	if cfg.CertDir == "" {
 		cfg.CertDir = "/var/lib/postnest/certs"
 	}
@@ -89,10 +141,12 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	if cfg.DNSProvider == "" {
 		cfg.DNSProvider = "cloudflare"
 	}
+	if !SupportedProvider(cfg.DNSProvider) {
+		return fmt.Errorf("unsupported DNS provider: %s", cfg.DNSProvider)
+	}
 
-	// Ensure certificate directory exists.
 	if err := os.MkdirAll(cfg.CertDir, 0750); err != nil {
-		return nil, fmt.Errorf("create cert dir: %w", err)
+		return fmt.Errorf("create cert dir: %w", err)
 	}
 
 	caDirURL := lego.LEDirectoryStaging
@@ -100,69 +154,76 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		caDirURL = lego.LEDirectoryProduction
 	}
 
-	accountDir := filepath.Join(cfg.CertDir, "accounts", hashString(caDirURL))
+	accountDir := filepath.Join(cfg.CertDir, "accounts", hashString(caDirURL+"|"+cfg.Email))
+	// Cert files are keyed by the (sorted) domain set so changing the set
+	// does not silently reuse a stale certificate.
+	setHash := hashString(strings.Join(domains, ","))
 
-	m := &Manager{
-		cfg:        cfg,
-		logger:     logger,
-		certPath:   filepath.Join(cfg.CertDir, cfg.Domain+".crt"),
-		keyPath:    filepath.Join(cfg.CertDir, cfg.Domain+".key"),
-		accountDir: accountDir,
-		stopCh:     make(chan struct{}),
-	}
+	m.cfg = cfg
+	m.domains = domains
+	m.certPath = filepath.Join(cfg.CertDir, setHash+".crt")
+	m.keyPath = filepath.Join(cfg.CertDir, setHash+".key")
+	m.accountDir = accountDir
 
-	// Load or generate account key.
 	key, err := m.loadOrCreateAccountKey()
 	if err != nil {
-		return nil, fmt.Errorf("load or create ACME account key: %w", err)
+		return fmt.Errorf("load or create ACME account key: %w", err)
 	}
-
 	user := &User{Email: cfg.Email, key: key}
 
-	// Create lego client.
 	legoCfg := lego.NewConfig(user)
 	legoCfg.CADirURL = caDirURL
 	legoCfg.Certificate.KeyType = certcrypto.EC256
 
 	client, err := lego.NewClient(legoCfg)
 	if err != nil {
-		return nil, fmt.Errorf("create lego client: %w", err)
+		return fmt.Errorf("create lego client: %w", err)
 	}
 	m.client = client
 
-	// Load or create registration.
 	reg, err := m.loadOrCreateRegistration(user)
 	if err != nil {
-		return nil, fmt.Errorf("load or create ACME registration: %w", err)
+		return fmt.Errorf("load or create ACME registration: %w", err)
 	}
 	user.Registration = reg
 	m.user = user
 
-	// Set up DNS provider.
-	if err := m.setupDNSProvider(); err != nil {
-		return nil, err
+	provider, err := BuildProvider(cfg.DNSProvider, cfg.DNSCredentials)
+	if err != nil {
+		return err
 	}
-
-	return m, nil
+	if err := m.client.Challenge.SetDNS01Provider(provider,
+		dns01.AddRecursiveNameservers([]string{"1.1.1.1:53", "8.8.8.8:53"}),
+		dns01.PropagationWait(2*time.Minute, false),
+	); err != nil {
+		return fmt.Errorf("set DNS-01 provider: %w", err)
+	}
+	return nil
 }
 
 // Start loads an existing certificate or obtains a new one, then starts
-// the background renewal worker. It blocks until the initial certificate
-// is available.
+// the background renewal worker. When the manager is disabled (no email
+// configured) this is a no-op apart from starting the worker.
 func (m *Manager) Start(ctx context.Context) error {
-	if err := m.loadCertificate(); err == nil {
-		m.logger.Info("loaded existing certificate",
-			"domain", m.cfg.Domain,
-			"path", m.certPath,
-		)
-	} else {
-		m.logger.Info("no valid existing certificate, obtaining new one",
-			"domain", m.cfg.Domain,
-			"error", err,
-		)
-		if err := m.obtainCertificate(ctx); err != nil {
-			return fmt.Errorf("obtain certificate: %w", err)
+	if m.client != nil && len(m.domains) > 0 {
+		if err := m.loadCertificate(); err == nil {
+			m.logger.Info("loaded existing certificate",
+				"domains", m.domains,
+				"path", m.certPath,
+			)
+		} else {
+			m.logger.Info("no valid existing certificate, obtaining new one",
+				"domains", m.domains,
+				"error", err,
+			)
+			if err := m.obtainCertificate(); err != nil {
+				return fmt.Errorf("obtain certificate: %w", err)
+			}
 		}
+	} else if m.client != nil {
+		m.logger.Info("ACME configured but no domains yet, waiting for domains")
+	} else {
+		m.logger.Info("ACME manager started in disabled state")
 	}
 
 	m.wg.Add(1)
@@ -181,6 +242,57 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
+// Reload swaps in a new configuration at runtime. The lego client and DNS
+// provider are rebuilt. If the domain set changed, a fresh certificate is
+// obtained immediately; otherwise the existing certificate is retained.
+// Transitioning to disabled (empty email) clears the active certificate.
+func (m *Manager) Reload(cfg Config) error {
+	// Transition to disabled.
+	if cfg.Email == "" {
+		m.mu.Lock()
+		m.cfg = cfg
+		m.domains = nil
+		m.client = nil
+		m.user = nil
+		m.certPath = ""
+		m.keyPath = ""
+		m.accountDir = ""
+		m.current.Store(nil)
+		m.mu.Unlock()
+		m.logger.Info("ACME disabled, certificate cleared")
+		return nil
+	}
+
+	m.mu.Lock()
+	oldDomains := strings.Join(m.domains, ",")
+	if err := m.applyConfig(cfg); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	newDomains := strings.Join(m.domains, ",")
+	domainsChanged := oldDomains != newDomains
+	m.mu.Unlock()
+
+	if domainsChanged {
+		m.logger.Info("ACME domain set changed, obtaining new certificate",
+			"old", oldDomains, "new", newDomains)
+		if err := m.obtainCertificate(); err != nil {
+			return fmt.Errorf("obtain after reload: %w", err)
+		}
+	} else if m.current.Load() == nil {
+		if len(m.domains) > 0 {
+			if err := m.loadCertificate(); err == nil {
+				m.logger.Info("ACME enabled, loaded existing certificate")
+				return nil
+			}
+			if err := m.obtainCertificate(); err != nil {
+				return fmt.Errorf("obtain after reload: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 // GetCertificate returns the current tls.Certificate. It is safe for
 // concurrent use and intended for tls.Config.GetCertificate.
 func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -194,6 +306,37 @@ func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 // CurrentCertificate returns the currently loaded certificate for inspection.
 func (m *Manager) CurrentCertificate() *tls.Certificate {
 	return m.current.Load()
+}
+
+// Status returns a snapshot of certificate state for the admin UI.
+func (m *Manager) Status() Status {
+	m.mu.RLock()
+	st := Status{
+		Domains:     append([]string(nil), m.domains...),
+		Directory:   m.cfg.Directory,
+		DNSProvider: m.cfg.DNSProvider,
+	}
+	m.mu.RUnlock()
+
+	cert := m.current.Load()
+	if cert == nil || len(cert.Certificate) == 0 {
+		return st
+	}
+	x, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return st
+	}
+	st.HasCert = true
+	st.Issuer = x.Issuer.CommonName
+	st.NotBefore = x.NotBefore
+	st.NotAfter = x.NotAfter
+	st.DaysRemaining = int(time.Until(x.NotAfter).Hours() / 24)
+	return st
+}
+
+// ForceRenew obtains a fresh certificate regardless of expiry.
+func (m *Manager) ForceRenew() error {
+	return m.obtainCertificate()
 }
 
 // ---------------------------------------------------------------------------
@@ -269,28 +412,17 @@ func (m *Manager) loadOrCreateRegistration(user *User) (*registration.Resource, 
 	return reg, nil
 }
 
-func (m *Manager) setupDNSProvider() error {
-	switch m.cfg.DNSProvider {
-	case "cloudflare":
-		provider, err := cloudflare.NewDNSProvider()
-		if err != nil {
-			return fmt.Errorf("create cloudflare DNS provider: %w", err)
-		}
-		return m.client.Challenge.SetDNS01Provider(provider,
-			dns01.AddRecursiveNameservers([]string{"1.1.1.1:53", "8.8.8.8:53"}),
-			dns01.PropagationWait(2*time.Minute, false),
-		)
-	default:
-		return fmt.Errorf("unsupported DNS provider: %s", m.cfg.DNSProvider)
-	}
-}
-
 func (m *Manager) loadCertificate() error {
-	certPEM, err := os.ReadFile(m.certPath)
+	m.mu.RLock()
+	certPath, keyPath := m.certPath, m.keyPath
+	want := append([]string(nil), m.domains...)
+	m.mu.RUnlock()
+
+	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
 		return err
 	}
-	keyPEM, err := os.ReadFile(m.keyPath)
+	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
 		return err
 	}
@@ -299,7 +431,6 @@ func (m *Manager) loadCertificate() error {
 	if err != nil {
 		return fmt.Errorf("parse certificate: %w", err)
 	}
-
 	if len(cert.Certificate) == 0 {
 		return fmt.Errorf("certificate chain is empty")
 	}
@@ -308,37 +439,41 @@ func (m *Manager) loadCertificate() error {
 	if err != nil {
 		return fmt.Errorf("parse x509 certificate: %w", err)
 	}
-
 	if time.Now().After(x509Cert.NotAfter) {
 		return fmt.Errorf("certificate expired on %s", x509Cert.NotAfter)
 	}
 
-	// Verify domain matches.
-	found := x509Cert.Subject.CommonName == m.cfg.Domain
-	if !found {
-		for _, san := range x509Cert.DNSNames {
-			if san == m.cfg.Domain {
-				found = true
-				break
-			}
-		}
+	// Every configured domain must be covered by the SAN list.
+	san := make(map[string]struct{}, len(x509Cert.DNSNames))
+	for _, d := range x509Cert.DNSNames {
+		san[strings.ToLower(d)] = struct{}{}
 	}
-	if !found {
-		return fmt.Errorf("certificate domain mismatch")
+	if x509Cert.Subject.CommonName != "" {
+		san[strings.ToLower(x509Cert.Subject.CommonName)] = struct{}{}
+	}
+	for _, d := range want {
+		if _, ok := san[d]; !ok {
+			return fmt.Errorf("certificate missing domain %q in SAN", d)
+		}
 	}
 
 	m.current.Store(&cert)
 	return nil
 }
 
-func (m *Manager) obtainCertificate(ctx context.Context) error {
+func (m *Manager) obtainCertificate() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.domains) == 0 {
+		return fmt.Errorf("no domains configured")
+	}
+
 	request := certificate.ObtainRequest{
-		Domains: []string{m.cfg.Domain},
+		Domains: append([]string(nil), m.domains...),
 		Bundle:  true,
 	}
 
-	// lego's Obtain does not accept context directly; rely on internal
-	// timeouts from the DNS provider.
 	certs, err := m.client.Certificate.Obtain(request)
 	if err != nil {
 		return fmt.Errorf("ACME obtain: %w", err)
@@ -357,15 +492,18 @@ func (m *Manager) obtainCertificate(ctx context.Context) error {
 	}
 
 	m.current.Store(&cert)
-	m.logger.Info("certificate obtained", "domain", m.cfg.Domain)
+	m.logger.Info("certificate obtained", "domains", m.domains)
 	return nil
 }
 
 func (m *Manager) renewalLoop(ctx context.Context) {
-	// Immediate check on startup.
-	if m.needsRenewal() {
-		m.logger.Info("certificate needs renewal on startup", "domain", m.cfg.Domain)
-		if err := m.renew(ctx); err != nil {
+	m.mu.RLock()
+	hasConfig := m.client != nil && len(m.domains) > 0
+	m.mu.RUnlock()
+
+	if hasConfig && m.needsRenewal() {
+		m.logger.Info("certificate needs renewal on startup", "domains", m.domains)
+		if err := m.obtainCertificate(); err != nil {
 			m.logger.Error("initial renewal attempt failed", "error", err)
 		}
 	}
@@ -380,59 +518,30 @@ func (m *Manager) renewalLoop(ctx context.Context) {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			if !m.needsRenewal() {
+			m.mu.RLock()
+			hasConfig := m.client != nil && len(m.domains) > 0
+			m.mu.RUnlock()
+			if !hasConfig || !m.needsRenewal() {
 				continue
 			}
-			m.logger.Info("attempting certificate renewal", "domain", m.cfg.Domain)
-			if err := m.renew(ctx); err != nil {
+			m.logger.Info("attempting certificate renewal", "domains", m.domains)
+			if err := m.obtainCertificate(); err != nil {
 				m.logger.Error("certificate renewal failed", "error", err)
 				continue
 			}
-			m.logger.Info("certificate renewed successfully", "domain", m.cfg.Domain)
+			m.logger.Info("certificate renewed successfully", "domains", m.domains)
 		}
 	}
 }
 
 func (m *Manager) needsRenewal() bool {
 	cert := m.current.Load()
-	if cert == nil {
+	if cert == nil || len(cert.Certificate) == 0 {
 		return true
 	}
-	if len(cert.Certificate) == 0 {
-		return true
-	}
-
 	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		return true
 	}
-
 	return time.Now().Add(m.cfg.RenewBefore).After(x509Cert.NotAfter)
-}
-
-func (m *Manager) renew(ctx context.Context) error {
-	request := certificate.ObtainRequest{
-		Domains: []string{m.cfg.Domain},
-		Bundle:  true,
-	}
-
-	certs, err := m.client.Certificate.Obtain(request)
-	if err != nil {
-		return fmt.Errorf("ACME renew: %w", err)
-	}
-
-	if err := os.WriteFile(m.certPath, certs.Certificate, 0644); err != nil {
-		return fmt.Errorf("write certificate: %w", err)
-	}
-	if err := os.WriteFile(m.keyPath, certs.PrivateKey, 0600); err != nil {
-		return fmt.Errorf("write key: %w", err)
-	}
-
-	cert, err := tls.X509KeyPair(certs.Certificate, certs.PrivateKey)
-	if err != nil {
-		return fmt.Errorf("load renewed certificate: %w", err)
-	}
-
-	m.current.Store(&cert)
-	return nil
 }

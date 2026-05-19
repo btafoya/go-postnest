@@ -215,6 +215,30 @@ export async function removeUserDomain(userId, domainId) {
   await api.delete(`/admin/api/v1/users/${userId}/domains/${domainId}`, { baseURL: '' })
 }
 
+export async function listAliases(domainId) {
+  const res = await api.get(`/admin/api/v1/domains/${domainId}/aliases`, { baseURL: '' })
+  return res.data.aliases || []
+}
+
+export async function createAlias(domainId, localPart, userIds) {
+  const res = await api.post(`/admin/api/v1/domains/${domainId}/aliases`, { local_part: localPart, user_ids: userIds }, { baseURL: '' })
+  return res.data.alias
+}
+
+export async function setAliasTargets(aliasId, userIds) {
+  const res = await api.put(`/admin/api/v1/aliases/${aliasId}/targets`, { user_ids: userIds }, { baseURL: '' })
+  return res.data
+}
+
+export async function deleteAlias(aliasId) {
+  await api.delete(`/admin/api/v1/aliases/${aliasId}`, { baseURL: '' })
+}
+
+export async function setDomainCatchall(domainId, userId) {
+  const res = await api.patch(`/admin/api/v1/domains/${domainId}/catchall`, { user_id: userId }, { baseURL: '' })
+  return res.data
+}
+
 export async function getAdminSettings() {
   const res = await api.get('/admin/api/v1/settings', { baseURL: '' })
   return res.data.settings || {}
@@ -222,6 +246,45 @@ export async function getAdminSettings() {
 
 export async function updateAdminSettings(settings) {
   const res = await api.put('/admin/api/v1/settings', settings, { baseURL: '' })
+  return res.data
+}
+
+export async function getTLSStatus() {
+  const res = await api.get('/admin/api/v1/tls/status', { baseURL: '' })
+  return res.data.status
+}
+
+export async function getTLSProviders() {
+  const res = await api.get('/admin/api/v1/tls/providers', { baseURL: '' })
+  return res.data.providers || []
+}
+
+export async function getTLSConfig() {
+  const res = await api.get('/admin/api/v1/tls/config', { baseURL: '' })
+  return res.data.config
+}
+
+export async function updateTLSConfig(data) {
+  const res = await api.put('/admin/api/v1/tls/config', data, { baseURL: '' })
+  return res.data
+}
+
+export async function getTLSDomains() {
+  const res = await api.get('/admin/api/v1/tls/domains', { baseURL: '' })
+  return res.data.domains || []
+}
+
+export async function addTLSDomain(domain) {
+  const res = await api.post('/admin/api/v1/tls/domains', { domain }, { baseURL: '' })
+  return res.data
+}
+
+export async function deleteTLSDomain(id) {
+  await api.delete(`/admin/api/v1/tls/domains/${id}`, { baseURL: '' })
+}
+
+export async function renewTLS() {
+  const res = await api.post('/admin/api/v1/tls/renew', {}, { baseURL: '' })
   return res.data
 }
 

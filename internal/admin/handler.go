@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/go-postnest/postnest/internal/crypto"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -17,8 +18,11 @@ import (
 
 // Handler implements admin REST API.
 type Handler struct {
-	store Store
-	auth  *auth.Service
+	store     Store
+	auth      *auth.Service
+	certMgr   TLSManager
+	cipher    *crypto.Cipher
+	tlsReload func() error
 }
 
 // NewHandler creates an admin handler.
@@ -51,6 +55,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/admin/api/v1/domains/{id}", h.updateDomain)
 	r.Delete("/admin/api/v1/domains/{id}", h.deleteDomain)
 	r.Patch("/admin/api/v1/domains/{id}/active", h.toggleDomainActive)
+	r.Patch("/admin/api/v1/domains/{id}/catchall", h.setDomainCatchall)
+	r.Get("/admin/api/v1/domains/{id}/aliases", h.listAliases)
+	r.Post("/admin/api/v1/domains/{id}/aliases", h.createAlias)
+	r.Put("/admin/api/v1/aliases/{aliasID}/targets", h.setAliasTargets)
+	r.Delete("/admin/api/v1/aliases/{aliasID}", h.deleteAlias)
 
 	r.Get("/admin/api/v1/users", h.listUsers)
 	r.Post("/admin/api/v1/users", h.createUser)
@@ -63,6 +72,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 	r.Get("/admin/api/v1/settings", h.getSettings)
 	r.Put("/admin/api/v1/settings", h.updateSettings)
+
+	h.registerTLSRoutes(r)
 }
 
 func (h *Handler) listDomains(w http.ResponseWriter, r *http.Request) {
@@ -401,6 +412,114 @@ func mapMembershipError(err error) *api.AppError {
 		return api.NewValidationError([]api.FieldError{{Field: "role", Issue: "oneof", Param: "admin user readonly"}})
 	}
 	return mapStoreError(err, "Membership")
+}
+
+func (h *Handler) listAliases(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	domainID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
+		return
+	}
+	aliases, err := h.store.ListAliases(ctx, domainID)
+	if err != nil {
+		api.WriteError(w, mapStoreError(err, "Alias"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aliases": toAliasDTOs(aliases)})
+}
+
+type createAliasReq struct {
+	LocalPart string      `json:"local_part" validate:"required,max=64"`
+	UserIDs   []uuid.UUID `json:"user_ids" validate:"required,min=1"`
+}
+
+func (h *Handler) createAlias(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	domainID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
+		return
+	}
+	var req createAliasReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
+		return
+	}
+	a, err := h.store.CreateAlias(ctx, domainID, req.LocalPart, req.UserIDs)
+	if err != nil {
+		api.WriteError(w, mapStoreError(err, "Alias"))
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"alias": toAliasDTO(a)})
+}
+
+type setAliasTargetsReq struct {
+	UserIDs []uuid.UUID `json:"user_ids" validate:"required,min=1"`
+}
+
+func (h *Handler) setAliasTargets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	aliasID, err := uuid.Parse(chi.URLParam(r, "aliasID"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "aliasID", Issue: "uuid"}}))
+		return
+	}
+	var req setAliasTargetsReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
+		return
+	}
+	if err := h.store.SetAliasTargets(ctx, aliasID, req.UserIDs); err != nil {
+		api.WriteError(w, mapStoreError(err, "Alias"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+}
+
+func (h *Handler) deleteAlias(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	aliasID, err := uuid.Parse(chi.URLParam(r, "aliasID"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "aliasID", Issue: "uuid"}}))
+		return
+	}
+	if err := h.store.DeleteAlias(ctx, aliasID); err != nil {
+		api.WriteError(w, mapStoreError(err, "Alias"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+type setCatchallReq struct {
+	UserID *uuid.UUID `json:"user_id"`
+}
+
+func (h *Handler) setDomainCatchall(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	domainID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
+		return
+	}
+	var req setCatchallReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if err := h.store.SetDomainCatchall(ctx, domainID, req.UserID); err != nil {
+		api.WriteError(w, mapStoreError(err, "Domain"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"updated": true})
 }
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {

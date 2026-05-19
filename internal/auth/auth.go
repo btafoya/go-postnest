@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -393,6 +394,79 @@ func (s *Service) CountDomains(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM domains`).Scan(&n)
 	return n, err
+}
+
+// ResolveRecipients maps an inbound recipient address to delivery targets.
+// Resolution order: exact user match, then alias targets (fan-out), then the
+// domain catch-all user. Returns the resolved domain and zero or more target
+// users. An empty target slice with nil error means no route was found.
+func (s *Service) ResolveRecipients(ctx context.Context, recipient string) ([]*models.User, *models.Domain, error) {
+	recipient = strings.ToLower(strings.TrimSpace(recipient))
+	at := strings.LastIndex(recipient, "@")
+	if at <= 0 || at == len(recipient)-1 {
+		return nil, nil, fmt.Errorf("invalid recipient email: %s", recipient)
+	}
+	localPart := recipient[:at]
+	domainName := recipient[at+1:]
+
+	domain, err := s.GetDomainByName(ctx, domainName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("domain lookup: %w", err)
+	}
+
+	// 1. Exact user match.
+	if u, err := s.GetUserByEmail(ctx, recipient); err == nil {
+		return []*models.User{u}, domain, nil
+	}
+
+	// 2. Alias targets (fan-out).
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id, u.email, u.password_hash, u.display_name, u.timezone, u.locale, u.is_super_admin, u.created_at, u.updated_at, u.settings
+		FROM aliases a
+		JOIN alias_targets at ON at.alias_id = a.id
+		JOIN users u ON u.id = at.user_id
+		WHERE a.domain_id = $1 AND a.local_part = $2
+	`, domain.ID, localPart)
+	if err != nil {
+		return nil, nil, fmt.Errorf("alias lookup: %w", err)
+	}
+	defer rows.Close()
+	var targets []*models.User
+	for rows.Next() {
+		var u models.User
+		var settings []byte
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Timezone, &u.Locale, &u.IsSuperAdmin, &u.CreatedAt, &u.UpdatedAt, &settings); err != nil {
+			return nil, nil, err
+		}
+		targets = append(targets, &u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(targets) > 0 {
+		return targets, domain, nil
+	}
+
+	// 3. Domain catch-all.
+	var catchallID *uuid.UUID
+	if err := s.pool.QueryRow(ctx, `SELECT catchall_user_id FROM domains WHERE id=$1`, domain.ID).Scan(&catchallID); err != nil {
+		return nil, nil, fmt.Errorf("catchall lookup: %w", err)
+	}
+	if catchallID != nil {
+		var u models.User
+		var settings []byte
+		err := s.pool.QueryRow(ctx, `
+			SELECT id, email, password_hash, display_name, timezone, locale, is_super_admin, created_at, updated_at, settings
+			FROM users WHERE id=$1
+		`, *catchallID).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Timezone, &u.Locale, &u.IsSuperAdmin, &u.CreatedAt, &u.UpdatedAt, &settings)
+		if err != nil {
+			return nil, nil, fmt.Errorf("catchall user lookup: %w", err)
+		}
+		return []*models.User{&u}, domain, nil
+	}
+
+	// 4. No route.
+	return nil, domain, nil
 }
 
 // GetUserByEmail fetches a user by their email address.

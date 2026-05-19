@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/go-postnest/postnest/internal/auth"
@@ -44,7 +43,6 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		return fmt.Errorf("parse inbound payload: %w", err)
 	}
 
-	// Resolve recipient
 	recipient := in.OriginalRecipient
 	if recipient == "" {
 		recipient = in.To
@@ -53,21 +51,13 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		return fmt.Errorf("no recipient in inbound payload")
 	}
 
-	parts := strings.Split(recipient, "@")
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid recipient email: %s", recipient)
-	}
-	domainName := parts[1]
-
-	// Lookup domain and user
-	domain, err := p.auth.GetDomainByName(ctx, domainName)
+	// Resolve recipient: exact user, alias fan-out, or domain catch-all.
+	targets, domain, err := p.auth.ResolveRecipients(ctx, recipient)
 	if err != nil {
-		return fmt.Errorf("domain lookup: %w", err)
+		return fmt.Errorf("resolve recipient %s: %w", recipient, err)
 	}
-
-	user, err := p.auth.GetUserByEmail(ctx, recipient)
-	if err != nil {
-		return fmt.Errorf("user lookup for %s: %w", recipient, err)
+	if len(targets) == 0 {
+		return fmt.Errorf("no route for recipient: %s", recipient)
 	}
 
 	// Parse date
@@ -98,71 +88,80 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		}
 	}
 
-	// Build message
-	msg := &models.Message{
-		ID:              uuid.Must(uuid.NewV7()),
-		DomainID:        domain.ID,
-		UserID:          user.ID,
-		MessageIDHeader: in.MessageID,
-		Subject:         in.Subject,
-		FromAddress:     in.From,
-		FromName:        in.FromName,
-		ToAddresses:     []string{recipient},
-		Date:            msgDate,
-		PlainText:       in.TextBody,
-		HTMLBody:        bluemonday.UGCPolicy().Sanitize(in.HTMLBody),
-		SizeBytes:       len(in.TextBody) + len(in.HTMLBody),
-		IsOutbound:      false,
-		IsRead:          false,
-	}
+	sanitizedHTML := bluemonday.UGCPolicy().Sanitize(in.HTMLBody)
 
-	// Find or create thread
-	thread, err := p.store.FindOrCreateThread(ctx, domain.ID, user.ID, in.Subject, in.MessageID, "", nil)
-	if err != nil {
-		p.logger.Warn("thread find/create failed", "error", err)
-	} else {
-		msg.ThreadID = &thread.ID
+	type decodedAttachment struct {
+		name, contentType string
+		data              []byte
 	}
-
-	// Build attachments
-	var attachments []*models.Attachment
+	var decoded []decodedAttachment
 	for _, a := range in.Attachments {
 		data, err := base64.StdEncoding.DecodeString(a.Content)
 		if err != nil {
 			p.logger.Warn("failed to decode attachment", "name", a.Name, "error", err)
 			continue
 		}
-		attachments = append(attachments, &models.Attachment{
-			ID:          uuid.Must(uuid.NewV7()),
-			MessageID:   msg.ID,
-			Filename:    a.Name,
-			ContentType: a.ContentType,
-			SizeBytes:   len(data),
-			Data:        data,
-		})
+		decoded = append(decoded, decodedAttachment{name: a.Name, contentType: a.ContentType, data: data})
 	}
 
-	// Get INBOX label
-	inboxLabel, err := p.store.GetLabelByName(ctx, domain.ID, user.ID, "INBOX")
-	if err != nil {
-		return fmt.Errorf("inbox label lookup: %w", err)
-	}
+	// Fan-out: deliver an independent copy to each resolved target user.
+	for _, user := range targets {
+		msg := &models.Message{
+			ID:              uuid.Must(uuid.NewV7()),
+			DomainID:        domain.ID,
+			UserID:          user.ID,
+			MessageIDHeader: in.MessageID,
+			Subject:         in.Subject,
+			FromAddress:     in.From,
+			FromName:        in.FromName,
+			ToAddresses:     []string{recipient},
+			Date:            msgDate,
+			PlainText:       in.TextBody,
+			HTMLBody:        sanitizedHTML,
+			SizeBytes:       len(in.TextBody) + len(in.HTMLBody),
+			IsOutbound:      false,
+			IsRead:          false,
+		}
 
-	labelIDs := []uuid.UUID{inboxLabel.ID}
-	if err := p.store.CreateMessage(ctx, msg, labelIDs, attachments); err != nil {
-		return fmt.Errorf("create message: %w", err)
-	}
+		thread, err := p.store.FindOrCreateThread(ctx, domain.ID, user.ID, in.Subject, in.MessageID, "", nil)
+		if err != nil {
+			p.logger.Warn("thread find/create failed", "error", err, "user", user.ID)
+		} else {
+			msg.ThreadID = &thread.ID
+		}
 
-	// Update search vector
-	if err := p.store.UpdateSearchVector(ctx, msg.ID); err != nil {
-		p.logger.Warn("search vector update failed", "error", err)
-	}
+		var attachments []*models.Attachment
+		for _, d := range decoded {
+			attachments = append(attachments, &models.Attachment{
+				ID:          uuid.Must(uuid.NewV7()),
+				MessageID:   msg.ID,
+				Filename:    d.name,
+				ContentType: d.contentType,
+				SizeBytes:   len(d.data),
+				Data:        d.data,
+			})
+		}
 
-	p.logger.Info("inbound message processed",
-		"message_id", msg.ID,
-		"from", in.From,
-		"subject", in.Subject,
-		"recipient", recipient,
-	)
+		inboxLabel, err := p.store.GetLabelByName(ctx, domain.ID, user.ID, "INBOX")
+		if err != nil {
+			return fmt.Errorf("inbox label lookup for %s: %w", user.ID, err)
+		}
+
+		if err := p.store.CreateMessage(ctx, msg, []uuid.UUID{inboxLabel.ID}, attachments); err != nil {
+			return fmt.Errorf("create message for %s: %w", user.ID, err)
+		}
+
+		if err := p.store.UpdateSearchVector(ctx, msg.ID); err != nil {
+			p.logger.Warn("search vector update failed", "error", err, "message_id", msg.ID)
+		}
+
+		p.logger.Info("inbound message processed",
+			"message_id", msg.ID,
+			"from", in.From,
+			"subject", in.Subject,
+			"recipient", recipient,
+			"target_user", user.ID,
+		)
+	}
 	return nil
 }

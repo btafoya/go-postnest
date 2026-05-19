@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/go-postnest/postnest/internal/certmanager"
 	"github.com/go-postnest/postnest/internal/config"
 	"github.com/go-postnest/postnest/internal/contacts"
+	"github.com/go-postnest/postnest/internal/crypto"
 	"github.com/go-postnest/postnest/internal/dav"
 	"github.com/go-postnest/postnest/internal/db"
 	"github.com/go-postnest/postnest/internal/imap"
@@ -124,7 +126,7 @@ func main() {
 	})
 
 	adminHandler := admin.NewHandler(adminStore, authService)
-	healthHandler := admin.NewHealthHandler(pgPool.Pool, redisClient, imapAddr, smtpAddr, authService, mailStore)
+	healthHandler := admin.NewHealthHandler(pgPool.Pool, redisClient, &imapAddr, &smtpAddr, authService, mailStore)
 
 	// Admin API routes
 	r.Group(func(r chi.Router) {
@@ -156,16 +158,31 @@ func main() {
 		certMgr           *certmanager.Manager
 	)
 
-	switch {
-	case cfg.ACMEEnabled:
-		cmCfg := certmanager.Config{
-			Email:         cfg.ACMEEmail,
-			Domain:        cfg.ACMEDomain,
-			Directory:     cfg.ACMEDirectory,
-			CertDir:       cfg.ACMECertDir,
-			DNSProvider:   cfg.ACMEDNSProvider,
-			RenewInterval: cfg.ACMERenewInterval,
-			RenewBefore:   cfg.ACMERenewBefore,
+	if cfg.SecretKey != "" {
+		cipher, cerr := crypto.NewCipher(cfg.SecretKey)
+		if cerr != nil {
+			log.Error("POSTNEST_SECRET_KEY is invalid", "error", cerr)
+			os.Exit(1)
+		}
+
+		// Seed the DB ACME config/domains from TOML on first run so existing
+		// deployments keep working before anything is set via the admin UI.
+		seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := seedACMEFromTOML(seedCtx, adminStore, cfg); err != nil {
+			seedCancel()
+			log.Error("failed to seed ACME config", "error", err)
+			os.Exit(1)
+		}
+		seedCancel()
+
+		buildCMCfg := func() (certmanager.Config, error) {
+			return acmeConfigFromDB(context.Background(), adminStore, cipher, cfg)
+		}
+
+		cmCfg, berr := buildCMCfg()
+		if berr != nil {
+			log.Error("failed to assemble ACME config", "error", berr)
+			os.Exit(1)
 		}
 		certMgr, err = certmanager.NewManager(cmCfg, log)
 		if err != nil {
@@ -179,15 +196,23 @@ func main() {
 			os.Exit(1)
 		}
 
+		// Admin UI mutations persist to the DB then call this to hot-reload.
+		adminHandler.WithTLS(certMgr, cipher, func() error {
+			newCfg, e := buildCMCfg()
+			if e != nil {
+				return e
+			}
+			return certMgr.Reload(newCfg)
+		})
+
 		tlsConfig = &tls.Config{
 			GetCertificate: certMgr.GetCertificate,
 		}
 		allowInsecureAuth = false
 		imapAddr = cfg.IMAPSAddr
 		smtpAddr = cfg.SMTPSAddr
-		log.Info("ACME TLS configured", "domain", cfg.ACMEDomain, "directory", cfg.ACMEDirectory)
-
-	case cfg.TLSCertPath != "" && cfg.TLSKeyPath != "":
+		log.Info("ACME TLS manager ready", "enabled", cmCfg.Email != "" && len(cmCfg.Domains) > 0, "domains", cmCfg.Domains, "directory", cmCfg.Directory)
+	} else if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.TLSCertPath, cfg.TLSKeyPath)
 		if err != nil {
 			log.Error("failed to load TLS certificates", "error", err)
@@ -200,8 +225,7 @@ func main() {
 		imapAddr = cfg.IMAPSAddr
 		smtpAddr = cfg.SMTPSAddr
 		log.Info("static TLS configured", "cert", cfg.TLSCertPath)
-
-	default:
+	} else {
 		allowInsecureAuth = cfg.AllowInsecureAuth
 		imapAddr = cfg.IMAPAddr
 		smtpAddr = cfg.SMTPAddr
@@ -275,4 +299,107 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// seedACMEFromTOML populates the DB ACME config/domains from legacy TOML/env
+// values on first run. It is a one-time bootstrap: existing rows are left
+// untouched so the admin UI remains the source of truth thereafter.
+func seedACMEFromTOML(ctx context.Context, store *admin.PGStore, cfg *config.Config) error {
+	dbCfg, err := store.GetACMEConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	shouldSeed := false
+	enabled := dbCfg.Enabled
+	email := dbCfg.Email
+	directory := dbCfg.Directory
+	dnsProvider := dbCfg.DNSProvider
+	credsEnc := dbCfg.CredentialsEnc
+
+	if email == "" && cfg.ACMEEmail != "" {
+		shouldSeed = true
+		email = cfg.ACMEEmail
+		directory = cfg.ACMEDirectory
+		if directory != "production" {
+			directory = "staging"
+		}
+		dnsProvider = cfg.ACMEDNSProvider
+		if dnsProvider == "" {
+			dnsProvider = "cloudflare"
+		}
+		enabled = cfg.ACMEEnabled
+	}
+	if !enabled && cfg.ACMEEnabled && email != "" {
+		shouldSeed = true
+		enabled = true
+	}
+
+	if shouldSeed {
+		if err := store.SetACMEConfig(ctx, enabled, email, directory, dnsProvider, credsEnc); err != nil {
+			return err
+		}
+	}
+
+	domains, err := store.ListACMEDomains(ctx)
+	if err != nil {
+		return err
+	}
+	if len(domains) == 0 && cfg.ACMEDomain != "" {
+		for _, d := range strings.Split(cfg.ACMEDomain, ",") {
+			d = strings.TrimSpace(d)
+			if d == "" {
+				continue
+			}
+			if _, err := store.AddACMEDomain(ctx, d); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// acmeConfigFromDB assembles a certmanager.Config from the DB-persisted ACME
+// configuration, decrypting DNS provider credentials with cipher. Renewal
+// timings and cert dir still come from TOML/env (operational, not per-tenant).
+func acmeConfigFromDB(ctx context.Context, store *admin.PGStore, cipher *crypto.Cipher, cfg *config.Config) (certmanager.Config, error) {
+	dbCfg, err := store.GetACMEConfig(ctx)
+	if err != nil {
+		return certmanager.Config{}, err
+	}
+	if !dbCfg.Enabled {
+		return certmanager.Config{
+			CertDir:       cfg.ACMECertDir,
+			RenewInterval: cfg.ACMERenewInterval,
+			RenewBefore:   cfg.ACMERenewBefore,
+		}, nil
+	}
+	creds := map[string]string{}
+	if dbCfg.CredentialsEnc != "" {
+		pt, derr := cipher.Decrypt(dbCfg.CredentialsEnc)
+		if derr != nil {
+			return certmanager.Config{}, derr
+		}
+		if err := json.Unmarshal([]byte(pt), &creds); err != nil {
+			return certmanager.Config{}, err
+		}
+	}
+	rows, err := store.ListACMEDomains(ctx)
+	if err != nil {
+		return certmanager.Config{}, err
+	}
+	domains := make([]string, 0, len(rows))
+	for _, r := range rows {
+		domains = append(domains, r.Domain)
+	}
+	return certmanager.Config{
+		Email:          dbCfg.Email,
+		Domains:        domains,
+		Directory:      dbCfg.Directory,
+		CertDir:        cfg.ACMECertDir,
+		DNSProvider:    dbCfg.DNSProvider,
+		DNSCredentials: creds,
+		RenewInterval:  cfg.ACMERenewInterval,
+		RenewBefore:    cfg.ACMERenewBefore,
+	}, nil
 }

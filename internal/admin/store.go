@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,8 +32,38 @@ type Store interface {
 	UpdateMemberRole(ctx context.Context, userID, domainID uuid.UUID, role string) error
 	RemoveMember(ctx context.Context, userID, domainID uuid.UUID) error
 
+	ListAliases(ctx context.Context, domainID uuid.UUID) ([]*models.Alias, error)
+	CreateAlias(ctx context.Context, domainID uuid.UUID, localPart string, userIDs []uuid.UUID) (*models.Alias, error)
+	SetAliasTargets(ctx context.Context, aliasID uuid.UUID, userIDs []uuid.UUID) error
+	DeleteAlias(ctx context.Context, aliasID uuid.UUID) error
+	SetDomainCatchall(ctx context.Context, domainID uuid.UUID, userID *uuid.UUID) error
+
 	GetSettings(ctx context.Context) (map[string]string, error)
 	SetSetting(ctx context.Context, key, value string) error
+
+	GetACMEConfig(ctx context.Context) (*ACMEConfigRow, error)
+	SetACMEConfig(ctx context.Context, enabled bool, email, directory, dnsProvider, credsEnc string) error
+	ListACMEDomains(ctx context.Context) ([]ACMEDomainRow, error)
+	AddACMEDomain(ctx context.Context, domain string) (*ACMEDomainRow, error)
+	DeleteACMEDomain(ctx context.Context, id uuid.UUID) error
+}
+
+// ACMEConfigRow is the singleton ACME configuration row. CredentialsEnc holds
+// the AES-256-GCM ciphertext of the DNS provider credential map (JSON).
+type ACMEConfigRow struct {
+	Enabled        bool      `json:"enabled"`
+	Email          string    `json:"email"`
+	Directory      string    `json:"directory"`
+	DNSProvider    string    `json:"dns_provider"`
+	CredentialsEnc string    `json:"-"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// ACMEDomainRow is a single SAN domain entry.
+type ACMEDomainRow struct {
+	ID        uuid.UUID `json:"id"`
+	Domain    string    `json:"domain"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // PGStore implements Store with PostgreSQL.
@@ -48,8 +79,9 @@ func NewPGStore(pool *pgxpool.Pool) *PGStore {
 // DomainRow is a domain with computed user count.
 type DomainRow struct {
 	models.Domain
-	IsActive  bool
-	UserCount int64
+	IsActive       bool
+	UserCount      int64
+	CatchallUserID *uuid.UUID
 }
 
 // UserRow is a user with domain memberships.
@@ -65,7 +97,7 @@ func (s *PGStore) ListDomains(ctx context.Context, limit, offset int) ([]*Domain
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT d.id, d.name, d.postmark_token, d.postmark_stream, d.is_active, d.created_at, d.updated_at,
-			COALESCE(m.cnt, 0)
+			COALESCE(m.cnt, 0), d.catchall_user_id
 		FROM domains d
 		LEFT JOIN (SELECT domain_id, COUNT(*) AS cnt FROM domain_members GROUP BY domain_id) m ON m.domain_id = d.id
 		ORDER BY d.created_at DESC
@@ -80,7 +112,7 @@ func (s *PGStore) ListDomains(ctx context.Context, limit, offset int) ([]*Domain
 	for rows.Next() {
 		var d DomainRow
 		var tok, stream *string
-		err := rows.Scan(&d.ID, &d.Name, &tok, &stream, &d.IsActive, &d.CreatedAt, &d.UpdatedAt, &d.UserCount)
+		err := rows.Scan(&d.ID, &d.Name, &tok, &stream, &d.IsActive, &d.CreatedAt, &d.UpdatedAt, &d.UserCount, &d.CatchallUserID)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -365,6 +397,144 @@ func (s *PGStore) RemoveMember(ctx context.Context, userID, domainID uuid.UUID) 
 	return nil
 }
 
+// ListAliases returns all aliases for a domain with their target users.
+func (s *PGStore) ListAliases(ctx context.Context, domainID uuid.UUID) ([]*models.Alias, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.id, a.domain_id, a.local_part, a.created_at,
+			at.user_id, u.email
+		FROM aliases a
+		LEFT JOIN alias_targets at ON at.alias_id = a.id
+		LEFT JOIN users u ON u.id = at.user_id
+		WHERE a.domain_id = $1
+		ORDER BY a.local_part ASC
+	`, domainID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	aliasMap := make(map[uuid.UUID]*models.Alias)
+	var order []uuid.UUID
+	for rows.Next() {
+		var id, dID uuid.UUID
+		var localPart string
+		var createdAt time.Time
+		var userID *uuid.UUID
+		var email *string
+		if err := rows.Scan(&id, &dID, &localPart, &createdAt, &userID, &email); err != nil {
+			return nil, err
+		}
+		a, exists := aliasMap[id]
+		if !exists {
+			a = &models.Alias{ID: id, DomainID: dID, LocalPart: localPart, CreatedAt: createdAt}
+			aliasMap[id] = a
+			order = append(order, id)
+		}
+		if userID != nil {
+			t := models.AliasTarget{AliasID: id, UserID: *userID}
+			if email != nil {
+				t.UserEmail = *email
+			}
+			a.Targets = append(a.Targets, t)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]*models.Alias, 0, len(order))
+	for _, id := range order {
+		out = append(out, aliasMap[id])
+	}
+	return out, nil
+}
+
+// CreateAlias inserts an alias and its target users atomically.
+func (s *PGStore) CreateAlias(ctx context.Context, domainID uuid.UUID, localPart string, userIDs []uuid.UUID) (*models.Alias, error) {
+	localPart = strings.ToLower(strings.TrimSpace(localPart))
+	id := uuid.Must(uuid.NewV7())
+	now := time.Now().UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO aliases (id, domain_id, local_part, created_at) VALUES ($1, $2, $3, $4)
+	`, id, domainID, localPart, now); err != nil {
+		return nil, err
+	}
+	for _, uid := range userIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO alias_targets (alias_id, user_id) VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, id, uid); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	a := &models.Alias{ID: id, DomainID: domainID, LocalPart: localPart, CreatedAt: now}
+	for _, uid := range userIDs {
+		a.Targets = append(a.Targets, models.AliasTarget{AliasID: id, UserID: uid})
+	}
+	return a, nil
+}
+
+// SetAliasTargets replaces an alias's target users atomically.
+func (s *PGStore) SetAliasTargets(ctx context.Context, aliasID uuid.UUID, userIDs []uuid.UUID) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM aliases WHERE id=$1)`, aliasID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM alias_targets WHERE alias_id=$1`, aliasID); err != nil {
+		return err
+	}
+	for _, uid := range userIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO alias_targets (alias_id, user_id) VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, aliasID, uid); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// DeleteAlias removes an alias (targets cascade via FK).
+func (s *PGStore) DeleteAlias(ctx context.Context, aliasID uuid.UUID) error {
+	ct, err := s.pool.Exec(ctx, `DELETE FROM aliases WHERE id=$1`, aliasID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetDomainCatchall sets or clears a domain's catch-all user.
+func (s *PGStore) SetDomainCatchall(ctx context.Context, domainID uuid.UUID, userID *uuid.UUID) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE domains SET catchall_user_id=$2, updated_at=$3 WHERE id=$1`, domainID, userID, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetSettings returns all system settings.
 func (s *PGStore) GetSettings(ctx context.Context) (map[string]string, error) {
 	rows, err := s.pool.Query(ctx, `SELECT key, value FROM system_settings ORDER BY key`)
@@ -390,4 +560,77 @@ func (s *PGStore) SetSetting(ctx context.Context, key, value string) error {
 		ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=$3
 	`, key, value, time.Now().UTC())
 	return err
+}
+
+// GetACMEConfig returns the singleton ACME config row (id=1).
+func (s *PGStore) GetACMEConfig(ctx context.Context) (*ACMEConfigRow, error) {
+	var r ACMEConfigRow
+	err := s.pool.QueryRow(ctx, `
+		SELECT enabled, email, directory, dns_provider, dns_credentials_enc, updated_at
+		FROM acme_config WHERE id = 1
+	`).Scan(&r.Enabled, &r.Email, &r.Directory, &r.DNSProvider, &r.CredentialsEnc, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// SetACMEConfig updates the singleton ACME config row.
+func (s *PGStore) SetACMEConfig(ctx context.Context, enabled bool, email, directory, dnsProvider, credsEnc string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE acme_config
+		SET enabled=$1, email=$2, directory=$3, dns_provider=$4, dns_credentials_enc=$5
+		WHERE id = 1
+	`, enabled, email, directory, dnsProvider, credsEnc)
+	return err
+}
+
+// ListACMEDomains returns all SAN domains ordered by domain.
+func (s *PGStore) ListACMEDomains(ctx context.Context) ([]ACMEDomainRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, domain, created_at FROM acme_domains ORDER BY domain
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ACMEDomainRow
+	for rows.Next() {
+		var d ACMEDomainRow
+		if err := rows.Scan(&d.ID, &d.Domain, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// AddACMEDomain inserts a SAN domain. Duplicate domains return ErrNotFound's
+// sibling: a unique-violation surfaces as a generic error to the caller.
+func (s *PGStore) AddACMEDomain(ctx context.Context, domain string) (*ACMEDomainRow, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	var d ACMEDomainRow
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO acme_domains (domain) VALUES ($1)
+		RETURNING id, domain, created_at
+	`, domain).Scan(&d.ID, &d.Domain, &d.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// DeleteACMEDomain removes a SAN domain by id.
+func (s *PGStore) DeleteACMEDomain(ctx context.Context, id uuid.UUID) error {
+	ct, err := s.pool.Exec(ctx, `DELETE FROM acme_domains WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

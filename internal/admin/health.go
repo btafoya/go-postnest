@@ -26,14 +26,17 @@ type mailCounter interface {
 type HealthHandler struct {
 	pgPool      *pgxpool.Pool
 	redisClient *redis.Client
-	imapAddr    string
-	smtpAddr    string
+	imapAddr    *string
+	smtpAddr    *string
 	authService authCounter
 	mailStore   mailCounter
 }
 
 // NewHealthHandler creates a HealthHandler with explicit dependencies.
-func NewHealthHandler(pgPool *pgxpool.Pool, redisClient *redis.Client, imapAddr, smtpAddr string, authService *auth.Service, mailStore mailstore.Store) *HealthHandler {
+// imapAddr/smtpAddr are pointers because the listener addresses are resolved
+// by the TLS strategy after this handler is constructed; the probe reads
+// them at request time.
+func NewHealthHandler(pgPool *pgxpool.Pool, redisClient *redis.Client, imapAddr, smtpAddr *string, authService *auth.Service, mailStore mailstore.Store) *HealthHandler {
 	return &HealthHandler{
 		pgPool:      pgPool,
 		redisClient: redisClient,
@@ -75,8 +78,8 @@ func (h *HealthHandler) handle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"database":       comp(func() error { return h.pgPool.Ping(ctx) }),
 		"redis":          comp(func() error { return h.redisClient.Ping(ctx).Err() }),
-		"imap":           comp(dialTCP(h.imapAddr)),
-		"smtp":           comp(dialTCP(h.smtpAddr)),
+		"imap":           comp(dialTCP(*h.imapAddr)),
+		"smtp":           comp(dialTCP(*h.smtpAddr)),
 		"worker_queue":   map[string]any{"depth": depth, "dead": dead},
 		"active_users":   activeUsers,
 		"messages_today": msgToday,

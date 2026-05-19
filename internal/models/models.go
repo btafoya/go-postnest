@@ -41,6 +41,23 @@ type DomainMember struct {
 	CreatedAt  time.Time
 }
 
+// Alias is an additional inbound address for a domain that delivers to one or
+// more target users (fan-out).
+type Alias struct {
+	ID        uuid.UUID
+	DomainID  uuid.UUID
+	LocalPart string
+	Targets   []AliasTarget
+	CreatedAt time.Time
+}
+
+// AliasTarget links an alias to a destination user.
+type AliasTarget struct {
+	AliasID     uuid.UUID
+	UserID      uuid.UUID
+	UserEmail   string
+}
+
 // Message is an email message stored in the system.
 type Message struct {
 	ID                uuid.UUID

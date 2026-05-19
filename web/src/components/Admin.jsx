@@ -1,13 +1,16 @@
 import React, { useState, useEffect } from 'react'
 import {
   Shield, Users, Globe, Activity, Plus, Edit2, Trash2, Check, X,
-  Save, Lock, AlertTriangle, Search,
+  Save, Lock, AlertTriangle, Search, RefreshCw,
 } from 'lucide-react'
 import {
   getDomains, createDomain, updateDomain, deleteDomain, toggleDomainActive,
   getHealth, getAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser,
   resetAdminUserPassword, getAdminSettings, updateAdminSettings,
   addUserDomain, updateUserDomainRole, removeUserDomain,
+  listAliases, createAlias, deleteAlias, setDomainCatchall,
+  getTLSStatus, getTLSProviders, getTLSConfig, updateTLSConfig,
+  getTLSDomains, addTLSDomain, deleteTLSDomain, renewTLS,
 } from '../api'
 
 const ROLES = ['admin', 'user', 'readonly']
@@ -28,17 +31,31 @@ export default function Admin() {
 
   // Forms
   const [domainForm, setDomainForm] = useState({ name: '', postmark_token: '', postmark_stream: 'outbound', is_active: true })
+  const [editingDomain, setEditingDomain] = useState(null)
+  const [domainAliases, setDomainAliases] = useState([])
+  const [allUsers, setAllUsers] = useState([])
+  const [aliasForm, setAliasForm] = useState({ local_part: '', user_ids: [] })
   const [userForm, setUserForm] = useState({ email: '', password: '', display_name: '', is_super_admin: false })
   const [editingUser, setEditingUser] = useState(null)
   const [memberForm, setMemberForm] = useState({ domain_id: '', role: 'user' })
   const [resetPassword, setResetPassword] = useState('')
   const [settingsForm, setSettingsForm] = useState({})
 
+  // TLS / ACME
+  const [tlsStatus, setTlsStatus] = useState(null)
+  const [tlsProviders, setTlsProviders] = useState([])
+  const [tlsConfig, setTlsConfig] = useState(null)
+  const [tlsConfigForm, setTlsConfigForm] = useState({ enabled: false, email: '', directory: 'staging', dns_provider: 'cloudflare', credentials: {} })
+  const [tlsDomains, setTlsDomains] = useState([])
+  const [newTlsDomain, setNewTlsDomain] = useState('')
+  const [tlsBusy, setTlsBusy] = useState(false)
+
   const tabs = [
     { id: 'overview', label: 'Overview', icon: Activity },
     { id: 'domains', label: 'Domains', icon: Globe },
     { id: 'users', label: 'Users', icon: Users },
     { id: 'security', label: 'Security', icon: Shield },
+    { id: 'tls', label: 'TLS / Certificates', icon: Lock },
   ]
 
   const fetchDomains = () => {
@@ -78,10 +95,96 @@ export default function Admin() {
     return () => { active = false; clearInterval(t) }
   }, [])
 
+  const fetchTLS = () => {
+    setLoading(true)
+    Promise.all([
+      getTLSStatus(),
+      getTLSProviders(),
+      getTLSConfig(),
+      getTLSDomains(),
+    ])
+      .then(([status, providers, config, domains]) => {
+        setTlsStatus(status)
+        setTlsProviders(providers)
+        setTlsConfig(config)
+        setTlsDomains(domains)
+        if (config) {
+          setTlsConfigForm({
+            enabled: config.enabled || false,
+            email: config.email || '',
+            directory: config.directory || 'staging',
+            dns_provider: config.dns_provider || 'cloudflare',
+            credentials: {},
+          })
+        }
+      })
+      .catch((err) => setError(err.response?.data?.error?.message || 'Failed to load TLS settings'))
+      .finally(() => setLoading(false))
+  }
+
+  const saveTLSConfig = async () => {
+    setTlsBusy(true)
+    setError('')
+    try {
+      await updateTLSConfig(tlsConfigForm)
+      setError('TLS configuration saved')
+      fetchTLS()
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to save TLS configuration')
+    } finally {
+      setTlsBusy(false)
+    }
+  }
+
+  const addTlsDomainHandler = async () => {
+    if (!newTlsDomain.trim()) return
+    setTlsBusy(true)
+    setError('')
+    try {
+      await addTLSDomain(newTlsDomain.trim())
+      setNewTlsDomain('')
+      fetchTLS()
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to add domain')
+    } finally {
+      setTlsBusy(false)
+    }
+  }
+
+  const deleteTlsDomainHandler = async (id) => {
+    if (!window.confirm('Remove this domain? The certificate will be re-issued without it.')) return
+    setTlsBusy(true)
+    setError('')
+    try {
+      await deleteTLSDomain(id)
+      fetchTLS()
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to remove domain')
+    } finally {
+      setTlsBusy(false)
+    }
+  }
+
+  const forceRenewHandler = async () => {
+    if (!window.confirm('Force certificate renewal now?')) return
+    setTlsBusy(true)
+    setError('')
+    try {
+      await renewTLS()
+      setError('Certificate renewed')
+      fetchTLS()
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Renewal failed')
+    } finally {
+      setTlsBusy(false)
+    }
+  }
+
   useEffect(() => {
     if (activeTab === 'domains') fetchDomains()
     if (activeTab === 'users') { fetchUsers(); getDomains().then(setDomains).catch(() => {}) }
     if (activeTab === 'security') fetchSettings()
+    if (activeTab === 'tls') fetchTLS()
   }, [activeTab])
 
   // Domain handlers
@@ -93,12 +196,59 @@ export default function Admin() {
         postmark_stream: domain.postmark_stream || 'outbound',
         is_active: domain.is_active !== false,
       })
+      setEditingDomain(domain)
       setDomainModal(domain.id)
+      listAliases(domain.id).then(setDomainAliases).catch(() => setDomainAliases([]))
+      getAdminUsers(100, 0).then(setAllUsers).catch(() => setAllUsers([]))
     } else {
       setDomainForm({ name: '', postmark_token: '', postmark_stream: 'outbound', is_active: true })
+      setEditingDomain(null)
+      setDomainAliases([])
       setDomainModal('new')
     }
+    setAliasForm({ local_part: '', user_ids: [] })
     setError('')
+  }
+
+  const refreshAliases = async (domainId) => {
+    try {
+      setDomainAliases(await listAliases(domainId))
+    } catch {
+      setDomainAliases([])
+    }
+  }
+
+  const addAlias = async () => {
+    if (!aliasForm.local_part || aliasForm.user_ids.length === 0) return
+    setError('')
+    try {
+      await createAlias(editingDomain.id, aliasForm.local_part, aliasForm.user_ids)
+      setAliasForm({ local_part: '', user_ids: [] })
+      await refreshAliases(editingDomain.id)
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to create alias')
+    }
+  }
+
+  const removeAlias = async (aliasId) => {
+    setError('')
+    try {
+      await deleteAlias(aliasId)
+      await refreshAliases(editingDomain.id)
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to delete alias')
+    }
+  }
+
+  const changeCatchall = async (userId) => {
+    setError('')
+    try {
+      await setDomainCatchall(editingDomain.id, userId || null)
+      setEditingDomain({ ...editingDomain, catchall_user_id: userId || null })
+      fetchDomains()
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to set catch-all')
+    }
   }
 
   const saveDomain = async () => {
@@ -421,7 +571,7 @@ export default function Admin() {
 
             {domainModal && (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-                <div className="w-full max-w-md rounded-lg bg-white shadow-lg">
+                <div className="w-full max-w-lg rounded-lg bg-white shadow-lg max-h-[90vh] overflow-y-auto">
                   <div className="flex items-center justify-between px-4 py-3 border-b border-surface-200">
                     <h3 className="text-sm font-semibold text-surface-900">
                       {domainModal === 'new' ? 'New Domain' : 'Edit Domain'}
@@ -471,6 +621,73 @@ export default function Admin() {
                       />
                       <label htmlFor="domain-active" className="text-sm text-surface-700">Active</label>
                     </div>
+
+                    {domainModal !== 'new' && editingDomain && (
+                      <>
+                        <div className="pt-2 border-t border-surface-200">
+                          <label className="block text-xs font-medium text-surface-600 mb-1">Catch-all User</label>
+                          <p className="text-xs text-surface-400 mb-1">Unmatched mail at this domain delivers here.</p>
+                          <select
+                            value={editingDomain.catchall_user_id || ''}
+                            onChange={(e) => changeCatchall(e.target.value)}
+                            className="input-field !py-1 !text-xs"
+                          >
+                            <option value="">None (reject unmatched)</option>
+                            {allUsers.map((u) => <option key={u.id} value={u.id}>{u.email}</option>)}
+                          </select>
+                        </div>
+
+                        <div className="pt-2 border-t border-surface-200">
+                          <label className="block text-xs font-medium text-surface-600 mb-2">Aliases</label>
+                          {domainAliases.length === 0 && (
+                            <p className="text-xs text-surface-400 mb-2">No aliases.</p>
+                          )}
+                          <div className="space-y-1.5">
+                            {domainAliases.map((a) => (
+                              <div key={a.id} className="flex items-start gap-2">
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-sm text-surface-700">{a.local_part}@{editingDomain.name}</span>
+                                  <span className="block text-xs text-surface-400 truncate">
+                                    → {(a.targets || []).map((t) => t.user_email).join(', ') || '(no targets)'}
+                                  </span>
+                                </div>
+                                <button
+                                  onClick={() => removeAlias(a.id)}
+                                  className="p-1 rounded hover:bg-red-50"
+                                  title="Delete alias"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-2 space-y-1.5">
+                            <input
+                              type="text"
+                              value={aliasForm.local_part}
+                              onChange={(e) => setAliasForm({ ...aliasForm, local_part: e.target.value })}
+                              className="input-field !py-1 !text-xs"
+                              placeholder="alias local part (e.g. sales)"
+                            />
+                            <select
+                              multiple
+                              value={aliasForm.user_ids}
+                              onChange={(e) => setAliasForm({ ...aliasForm, user_ids: Array.from(e.target.selectedOptions, (o) => o.value) })}
+                              className="input-field !text-xs h-24"
+                            >
+                              {allUsers.map((u) => <option key={u.id} value={u.id}>{u.email}</option>)}
+                            </select>
+                            <button
+                              onClick={addAlias}
+                              disabled={!aliasForm.local_part || aliasForm.user_ids.length === 0}
+                              className="btn-secondary !py-1 !text-xs disabled:opacity-40 w-full"
+                            >
+                              Add alias ({aliasForm.user_ids.length} target{aliasForm.user_ids.length === 1 ? '' : 's'})
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                   <div className="flex justify-end gap-2 px-4 py-3 border-t border-surface-200">
                     <button onClick={() => setDomainModal(null)} className="btn-secondary text-xs">Cancel</button>
@@ -795,6 +1012,189 @@ export default function Admin() {
                   Save Settings
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'tls' && (
+          <div className="max-w-3xl space-y-4">
+            <h2 className="text-sm font-medium text-surface-900">TLS / Certificates</h2>
+
+            <div className="card p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-surface-900">Certificate Status</p>
+                <button
+                  onClick={forceRenewHandler}
+                  disabled={tlsBusy || !tlsStatus}
+                  className="btn-secondary gap-2 text-xs disabled:opacity-50"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Force Renew
+                </button>
+              </div>
+              {tlsStatus ? (
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <p className="text-surface-500">Issuer</p>
+                    <p className="text-surface-900">{tlsStatus.issuer || '—'}</p>
+                  </div>
+                  <div>
+                    <p className="text-surface-500">Directory</p>
+                    <p className="text-surface-900">{tlsStatus.directory || '—'}</p>
+                  </div>
+                  <div>
+                    <p className="text-surface-500">Expires</p>
+                    <p className="text-surface-900">
+                      {tlsStatus.not_after ? new Date(tlsStatus.not_after).toLocaleString() : '—'}
+                      {tlsStatus.has_cert && (
+                        <span className={`ml-2 ${tlsStatus.days_remaining < 14 ? 'text-red-600' : 'text-green-600'}`}>
+                          ({tlsStatus.days_remaining}d)
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-surface-500">DNS Provider</p>
+                    <p className="text-surface-900">{tlsStatus.dns_provider || '—'}</p>
+                  </div>
+                  <div className="col-span-2">
+                    <p className="text-surface-500">SAN Domains</p>
+                    <p className="text-surface-900">{(tlsStatus.domains || []).join(', ') || '—'}</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-surface-500 flex items-center gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  ACME/TLS is not configured. Set POSTNEST_SECRET_KEY and enable ACME.
+                </p>
+              )}
+            </div>
+
+            <div className="card p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-surface-900">ACME Configuration</p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="tls-enabled"
+                    checked={tlsConfigForm.enabled}
+                    onChange={(e) => setTlsConfigForm((p) => ({ ...p, enabled: e.target.checked }))}
+                    className="rounded border-surface-300"
+                  />
+                  <label htmlFor="tls-enabled" className="text-sm text-surface-700">Enable ACME</label>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-surface-900 mb-1">Account Email</label>
+                <input
+                  type="email"
+                  value={tlsConfigForm.email}
+                  onChange={(e) => setTlsConfigForm((p) => ({ ...p, email: e.target.value }))}
+                  className="input-field w-full"
+                  placeholder="admin@example.com"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-surface-900 mb-1">Directory</label>
+                <select
+                  value={tlsConfigForm.directory}
+                  onChange={(e) => setTlsConfigForm((p) => ({ ...p, directory: e.target.value }))}
+                  className="input-field w-48"
+                >
+                  <option value="staging">Staging (Let's Encrypt test)</option>
+                  <option value="production">Production</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-surface-900 mb-1">DNS Provider</label>
+                <select
+                  value={tlsConfigForm.dns_provider}
+                  onChange={(e) => setTlsConfigForm((p) => ({ ...p, dns_provider: e.target.value, credentials: {} }))}
+                  className="input-field w-48"
+                >
+                  {tlsProviders.map((p) => (
+                    <option key={p.name} value={p.name}>{p.display}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="border-t border-surface-100 pt-4 space-y-3">
+                <p className="text-xs text-surface-500">
+                  Credentials are encrypted at rest. Leave a field blank to keep the stored value.
+                </p>
+                {(tlsProviders.find((p) => p.name === tlsConfigForm.dns_provider)?.fields || []).map((f) => {
+                  const isSet = tlsConfig?.creds_set?.[f.key]
+                  const common = {
+                    value: tlsConfigForm.credentials[f.key] || '',
+                    onChange: (e) => setTlsConfigForm((p) => ({
+                      ...p, credentials: { ...p.credentials, [f.key]: e.target.value },
+                    })),
+                    placeholder: isSet ? '•••••••• (stored)' : '',
+                    className: 'input-field w-full',
+                  }
+                  return (
+                    <div key={f.key}>
+                      <label className="block text-sm font-medium text-surface-900 mb-1">
+                        {f.label}{f.required && <span className="text-red-500"> *</span>}
+                      </label>
+                      {f.textarea ? (
+                        <textarea rows={4} {...common} />
+                      ) : (
+                        <input type={f.secret ? 'password' : 'text'} {...common} />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button onClick={saveTLSConfig} disabled={tlsBusy} className="btn-primary gap-2 text-xs disabled:opacity-50">
+                  <Save className="h-3.5 w-3.5" />
+                  Save Configuration
+                </button>
+              </div>
+            </div>
+
+            <div className="card p-4 space-y-3">
+              <p className="text-sm font-medium text-surface-900">SAN Domains</p>
+              <p className="text-xs text-surface-500">
+                All domains share a single SAN certificate. Adding or removing a domain re-issues the certificate.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newTlsDomain}
+                  onChange={(e) => setNewTlsDomain(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addTlsDomainHandler()}
+                  className="input-field flex-1"
+                  placeholder="mail.example.com"
+                />
+                <button onClick={addTlsDomainHandler} disabled={tlsBusy} className="btn-primary gap-2 text-xs disabled:opacity-50">
+                  <Plus className="h-3.5 w-3.5" />
+                  Add
+                </button>
+              </div>
+              {tlsDomains.length > 0 ? (
+                <ul className="divide-y divide-surface-100">
+                  {tlsDomains.map((d) => (
+                    <li key={d.id} className="flex items-center justify-between py-2 text-sm">
+                      <span className="text-surface-900">{d.domain}</span>
+                      <button
+                        onClick={() => deleteTlsDomainHandler(d.id)}
+                        disabled={tlsBusy}
+                        className="p-1 rounded hover:bg-red-50 text-red-500 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-surface-500">No domains configured.</p>
+              )}
             </div>
           </div>
         )}

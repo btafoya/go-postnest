@@ -55,7 +55,8 @@ type Config struct {
 	WorkerPollInterval time.Duration `env:"WORKER_POLL_INTERVAL" envDefault:"5s"`
 
 	// Security
-	AllowInsecureAuth bool `env:"ALLOW_INSECURE_AUTH" envDefault:"false"` // Allow plaintext IMAP/SMTP auth without TLS
+	AllowInsecureAuth bool   `env:"ALLOW_INSECURE_AUTH" envDefault:"false"` // Allow plaintext IMAP/SMTP auth without TLS
+	SecretKey         string `env:"SECRET_KEY"`                             // base64 32-byte AES key for encrypting DNS provider credentials at rest
 
 	// Limits
 	MaxMessageSize    int64 `env:"MAX_MESSAGE_SIZE" envDefault:"52428800"`    // 50MB
