@@ -21,8 +21,9 @@ type domainDTO struct {
 
 // membershipDTO is the JSON contract for a domain membership.
 type membershipDTO struct {
-	DomainID uuid.UUID `json:"domain_id"`
-	Role     string    `json:"role"`
+	DomainID   uuid.UUID `json:"domain_id"`
+	DomainName string    `json:"domain_name"`
+	Role       string    `json:"role"`
 }
 
 // userDTO is the JSON contract for a user.
@@ -72,8 +73,9 @@ func toDomainDTOFromModel(d *models.Domain) domainDTO {
 
 func toMembershipDTO(m *models.DomainMember) membershipDTO {
 	return membershipDTO{
-		DomainID: m.DomainID,
-		Role:     m.Role,
+		DomainID:   m.DomainID,
+		DomainName: m.DomainName,
+		Role:       m.Role,
 	}
 }
 

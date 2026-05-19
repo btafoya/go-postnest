@@ -11,6 +11,7 @@ import (
 )
 
 var ErrNotFound = fmt.Errorf("not found")
+var ErrInvalidRole = fmt.Errorf("invalid role")
 
 // Store handles admin persistence.
 type Store interface {
@@ -26,6 +27,9 @@ type Store interface {
 	DeleteUser(ctx context.Context, id uuid.UUID) error
 	ResetPassword(ctx context.Context, id uuid.UUID, passwordHash string) error
 	GetUserDomainMemberships(ctx context.Context, userID uuid.UUID) ([]*models.DomainMember, error)
+	AddMember(ctx context.Context, userID, domainID uuid.UUID, role string) (*models.DomainMember, error)
+	UpdateMemberRole(ctx context.Context, userID, domainID uuid.UUID, role string) error
+	RemoveMember(ctx context.Context, userID, domainID uuid.UUID) error
 
 	GetSettings(ctx context.Context) (map[string]string, error)
 	SetSetting(ctx context.Context, key, value string) error
@@ -162,9 +166,10 @@ func (s *PGStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow,
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT u.id, u.email, u.display_name, u.is_super_admin, u.created_at, u.updated_at,
-			dm.domain_id, dm.role, dm.created_at
+			dm.domain_id, d.name, dm.role, dm.created_at
 		FROM users u
 		LEFT JOIN domain_members dm ON dm.user_id = u.id
+		LEFT JOIN domains d ON d.id = dm.domain_id
 		ORDER BY u.created_at DESC
 		LIMIT $1 OFFSET $2
 	`, limit, offset)
@@ -181,10 +186,11 @@ func (s *PGStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow,
 		var isSuperAdmin bool
 		var createdAt, updatedAt time.Time
 		var domainID *uuid.UUID
+		var domainName *string
 		var role *string
 		var memCreatedAt *time.Time
 		err := rows.Scan(&uid, &email, &displayName, &isSuperAdmin, &createdAt, &updatedAt,
-			&domainID, &role, &memCreatedAt)
+			&domainID, &domainName, &role, &memCreatedAt)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -204,12 +210,16 @@ func (s *PGStore) ListUsers(ctx context.Context, limit, offset int) ([]*UserRow,
 			order = append(order, uid)
 		}
 		if domainID != nil && role != nil {
-			u.Memberships = append(u.Memberships, &models.DomainMember{
+			m := &models.DomainMember{
 				DomainID:  *domainID,
 				UserID:    uid,
 				Role:      *role,
 				CreatedAt: *memCreatedAt,
-			})
+			}
+			if domainName != nil {
+				m.DomainName = *domainName
+			}
+			u.Memberships = append(u.Memberships, m)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -284,7 +294,11 @@ func (s *PGStore) ResetPassword(ctx context.Context, id uuid.UUID, passwordHash 
 // GetUserDomainMemberships returns domain memberships for a user.
 func (s *PGStore) GetUserDomainMemberships(ctx context.Context, userID uuid.UUID) ([]*models.DomainMember, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT domain_id, user_id, role, created_at FROM domain_members WHERE user_id=$1
+		SELECT dm.domain_id, d.name, dm.user_id, dm.role, dm.created_at
+		FROM domain_members dm
+		JOIN domains d ON d.id = dm.domain_id
+		WHERE dm.user_id=$1
+		ORDER BY dm.created_at ASC
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -293,13 +307,62 @@ func (s *PGStore) GetUserDomainMemberships(ctx context.Context, userID uuid.UUID
 	var out []*models.DomainMember
 	for rows.Next() {
 		var m models.DomainMember
-		err := rows.Scan(&m.DomainID, &m.UserID, &m.Role, &m.CreatedAt)
+		err := rows.Scan(&m.DomainID, &m.DomainName, &m.UserID, &m.Role, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, &m)
 	}
 	return out, rows.Err()
+}
+
+var validRoles = map[string]bool{"admin": true, "user": true, "readonly": true}
+
+// AddMember grants a user membership in a domain at the given role.
+func (s *PGStore) AddMember(ctx context.Context, userID, domainID uuid.UUID, role string) (*models.DomainMember, error) {
+	if !validRoles[role] {
+		return nil, fmt.Errorf("%w: invalid role %q", ErrInvalidRole, role)
+	}
+	now := time.Now().UTC()
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO domain_members (domain_id, user_id, role, created_at)
+		VALUES ($1, $2, $3, $4)
+	`, domainID, userID, role, now)
+	if err != nil {
+		return nil, err
+	}
+	var name string
+	if err := s.pool.QueryRow(ctx, `SELECT name FROM domains WHERE id=$1`, domainID).Scan(&name); err != nil {
+		return nil, err
+	}
+	return &models.DomainMember{DomainID: domainID, DomainName: name, UserID: userID, Role: role, CreatedAt: now}, nil
+}
+
+// UpdateMemberRole changes a user's role within a domain.
+func (s *PGStore) UpdateMemberRole(ctx context.Context, userID, domainID uuid.UUID, role string) error {
+	if !validRoles[role] {
+		return fmt.Errorf("%w: invalid role %q", ErrInvalidRole, role)
+	}
+	ct, err := s.pool.Exec(ctx, `UPDATE domain_members SET role=$3 WHERE user_id=$1 AND domain_id=$2`, userID, domainID, role)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RemoveMember revokes a user's membership in a domain.
+func (s *PGStore) RemoveMember(ctx context.Context, userID, domainID uuid.UUID) error {
+	ct, err := s.pool.Exec(ctx, `DELETE FROM domain_members WHERE user_id=$1 AND domain_id=$2`, userID, domainID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetSettings returns all system settings.

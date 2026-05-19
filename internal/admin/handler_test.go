@@ -37,6 +37,11 @@ type mockStore struct {
 	getSettingsErr    error
 	setSettingErr     error
 	lastCreateUserHash string
+	memberships       []*models.DomainMember
+	addMemberErr      error
+	updateMemberErr   error
+	removeMemberErr   error
+	lastAddRole       string
 }
 
 func (m *mockStore) ListDomains(ctx context.Context, limit, offset int) ([]*DomainRow, int64, error) {
@@ -115,7 +120,23 @@ func (m *mockStore) ResetPassword(ctx context.Context, id uuid.UUID, passwordHas
 }
 
 func (m *mockStore) GetUserDomainMemberships(ctx context.Context, userID uuid.UUID) ([]*models.DomainMember, error) {
-	return nil, nil
+	return m.memberships, nil
+}
+
+func (m *mockStore) AddMember(ctx context.Context, userID, domainID uuid.UUID, role string) (*models.DomainMember, error) {
+	if m.addMemberErr != nil {
+		return nil, m.addMemberErr
+	}
+	m.lastAddRole = role
+	return &models.DomainMember{DomainID: domainID, DomainName: "example.com", UserID: userID, Role: role, CreatedAt: time.Now().UTC()}, nil
+}
+
+func (m *mockStore) UpdateMemberRole(ctx context.Context, userID, domainID uuid.UUID, role string) error {
+	return m.updateMemberErr
+}
+
+func (m *mockStore) RemoveMember(ctx context.Context, userID, domainID uuid.UUID) error {
+	return m.removeMemberErr
 }
 
 func (m *mockStore) GetSettings(ctx context.Context) (map[string]string, error) {
@@ -894,5 +915,178 @@ func TestListUsers_InvalidPagination(t *testing.T) {
 				t.Errorf("expected detail with field=%q issue=%q, got %v", tt.wantField, tt.wantIssue, details)
 			}
 		})
+	}
+}
+
+func TestAddUserDomain_Success(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	domainID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]string{"domain_id": domainID.String(), "role": "admin"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users/"+userID.String()+"/domains", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+	if store.lastAddRole != "admin" {
+		t.Errorf("lastAddRole = %q, want admin", store.lastAddRole)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	m, ok := resp["membership"].(map[string]any)
+	if !ok {
+		t.Fatal("expected membership key")
+	}
+	if m["role"] != "admin" {
+		t.Errorf("role = %v, want admin", m["role"])
+	}
+	if m["domain_name"] != "example.com" {
+		t.Errorf("domain_name = %v, want example.com", m["domain_name"])
+	}
+}
+
+func TestAddUserDomain_InvalidRole(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	domainID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]string{"domain_id": domainID.String(), "role": "owner"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users/"+userID.String()+"/domains", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
+func TestAddUserDomain_BadUserID(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	body, _ := json.Marshal(map[string]string{"domain_id": uuid.Must(uuid.NewV7()).String(), "role": "user"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/users/not-a-uuid/domains", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestUpdateUserDomainRole_Success(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	domainID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]string{"role": "readonly"})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/users/"+userID.String()+"/domains/"+domainID.String(), bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestUpdateUserDomainRole_NotFound(t *testing.T) {
+	store := &mockStore{updateMemberErr: ErrNotFound}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	domainID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]string{"role": "user"})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/users/"+userID.String()+"/domains/"+domainID.String(), bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestRemoveUserDomain_Success(t *testing.T) {
+	store := &mockStore{}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	domainID := uuid.Must(uuid.NewV7())
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/v1/users/"+userID.String()+"/domains/"+domainID.String(), nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestRemoveUserDomain_NotFound(t *testing.T) {
+	store := &mockStore{removeMemberErr: ErrNotFound}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	domainID := uuid.Must(uuid.NewV7())
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/v1/users/"+userID.String()+"/domains/"+domainID.String(), nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestUpdateUser_ReturnsRealMemberships(t *testing.T) {
+	domainID := uuid.Must(uuid.NewV7())
+	store := &mockStore{
+		memberships: []*models.DomainMember{
+			{DomainID: domainID, DomainName: "example.com", Role: "user"},
+		},
+	}
+	h := newTestHandler(store)
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	userID := uuid.Must(uuid.NewV7())
+	body, _ := json.Marshal(map[string]any{"email": "u@example.com", "display_name": "U", "is_super_admin": false})
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/users/"+userID.String(), bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (%s)", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	u := resp["user"].(map[string]any)
+	mems, ok := u["memberships"].([]any)
+	if !ok || len(mems) != 1 {
+		t.Fatalf("expected 1 membership, got %v", u["memberships"])
+	}
+	if mems[0].(map[string]any)["domain_name"] != "example.com" {
+		t.Errorf("domain_name = %v, want example.com", mems[0])
 	}
 }

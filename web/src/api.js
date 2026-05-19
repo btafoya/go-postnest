@@ -201,6 +201,20 @@ export async function resetAdminUserPassword(id, password) {
   return res.data
 }
 
+export async function addUserDomain(userId, domainId, role) {
+  const res = await api.post(`/admin/api/v1/users/${userId}/domains`, { domain_id: domainId, role }, { baseURL: '' })
+  return res.data.membership
+}
+
+export async function updateUserDomainRole(userId, domainId, role) {
+  const res = await api.put(`/admin/api/v1/users/${userId}/domains/${domainId}`, { role }, { baseURL: '' })
+  return res.data
+}
+
+export async function removeUserDomain(userId, domainId) {
+  await api.delete(`/admin/api/v1/users/${userId}/domains/${domainId}`, { baseURL: '' })
+}
+
 export async function getAdminSettings() {
   const res = await api.get('/admin/api/v1/settings', { baseURL: '' })
   return res.data.settings || {}

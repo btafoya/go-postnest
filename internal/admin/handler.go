@@ -57,6 +57,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Put("/admin/api/v1/users/{id}", h.updateUser)
 	r.Delete("/admin/api/v1/users/{id}", h.deleteUser)
 	r.Post("/admin/api/v1/users/{id}/reset-password", h.resetPassword)
+	r.Post("/admin/api/v1/users/{id}/domains", h.addUserDomain)
+	r.Put("/admin/api/v1/users/{id}/domains/{domainID}", h.updateUserDomainRole)
+	r.Delete("/admin/api/v1/users/{id}/domains/{domainID}", h.removeUserDomain)
 
 	r.Get("/admin/api/v1/settings", h.getSettings)
 	r.Put("/admin/api/v1/settings", h.updateSettings)
@@ -253,7 +256,12 @@ func (h *Handler) updateUser(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, mapStoreError(err, "User"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": userDTO{ID: id, Email: req.Email, DisplayName: req.DisplayName, IsSuperAdmin: req.IsSuperAdmin, Memberships: []membershipDTO{}}})
+	mems, err := h.store.GetUserDomainMemberships(ctx, id)
+	if err != nil {
+		api.WriteError(w, mapStoreError(err, "User"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": userDTO{ID: id, Email: req.Email, DisplayName: req.DisplayName, IsSuperAdmin: req.IsSuperAdmin, Memberships: toMembershipDTOs(mems)}})
 }
 
 func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +309,98 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
+}
+
+type addUserDomainReq struct {
+	DomainID string `json:"domain_id" validate:"required,uuid"`
+	Role     string `json:"role" validate:"required,oneof=admin user readonly"`
+}
+
+func (h *Handler) addUserDomain(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
+		return
+	}
+	var req addUserDomainReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
+		return
+	}
+	domainID, err := uuid.Parse(req.DomainID)
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "domain_id", Issue: "uuid"}}))
+		return
+	}
+	m, err := h.store.AddMember(ctx, userID, domainID, req.Role)
+	if err != nil {
+		api.WriteError(w, mapMembershipError(err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"membership": toMembershipDTO(m)})
+}
+
+type updateUserDomainRoleReq struct {
+	Role string `json:"role" validate:"required,oneof=admin user readonly"`
+}
+
+func (h *Handler) updateUserDomainRole(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
+		return
+	}
+	domainID, err := uuid.Parse(chi.URLParam(r, "domainID"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "domainID", Issue: "uuid"}}))
+		return
+	}
+	var req updateUserDomainRoleReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		api.WriteError(w, api.NewValidationError(mapValidationErrors(err)))
+		return
+	}
+	if err := h.store.UpdateMemberRole(ctx, userID, domainID, req.Role); err != nil {
+		api.WriteError(w, mapMembershipError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+}
+
+func (h *Handler) removeUserDomain(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "id", Issue: "uuid"}}))
+		return
+	}
+	domainID, err := uuid.Parse(chi.URLParam(r, "domainID"))
+	if err != nil {
+		api.WriteError(w, api.NewValidationError([]api.FieldError{{Field: "domainID", Issue: "uuid"}}))
+		return
+	}
+	if err := h.store.RemoveMember(ctx, userID, domainID); err != nil {
+		api.WriteError(w, mapMembershipError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+func mapMembershipError(err error) *api.AppError {
+	if errors.Is(err, ErrInvalidRole) {
+		return api.NewValidationError([]api.FieldError{{Field: "role", Issue: "oneof", Param: "admin user readonly"}})
+	}
+	return mapStoreError(err, "Membership")
 }
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {

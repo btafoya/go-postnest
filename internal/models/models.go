@@ -34,10 +34,11 @@ type Domain struct {
 
 // DomainMember links a user to a domain with a role.
 type DomainMember struct {
-	DomainID  uuid.UUID
-	UserID    uuid.UUID
-	Role      string
-	CreatedAt time.Time
+	DomainID   uuid.UUID
+	DomainName string
+	UserID     uuid.UUID
+	Role       string
+	CreatedAt  time.Time
 }
 
 // Message is an email message stored in the system.

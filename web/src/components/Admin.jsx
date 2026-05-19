@@ -7,7 +7,10 @@ import {
   getDomains, createDomain, updateDomain, deleteDomain, toggleDomainActive,
   getHealth, getAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser,
   resetAdminUserPassword, getAdminSettings, updateAdminSettings,
+  addUserDomain, updateUserDomainRole, removeUserDomain,
 } from '../api'
+
+const ROLES = ['admin', 'user', 'readonly']
 
 export default function Admin() {
   const [activeTab, setActiveTab] = useState('overview')
@@ -26,6 +29,8 @@ export default function Admin() {
   // Forms
   const [domainForm, setDomainForm] = useState({ name: '', postmark_token: '', postmark_stream: 'outbound', is_active: true })
   const [userForm, setUserForm] = useState({ email: '', password: '', display_name: '', is_super_admin: false })
+  const [editingUser, setEditingUser] = useState(null)
+  const [memberForm, setMemberForm] = useState({ domain_id: '', role: 'user' })
   const [resetPassword, setResetPassword] = useState('')
   const [settingsForm, setSettingsForm] = useState({})
 
@@ -75,7 +80,7 @@ export default function Admin() {
 
   useEffect(() => {
     if (activeTab === 'domains') fetchDomains()
-    if (activeTab === 'users') fetchUsers()
+    if (activeTab === 'users') { fetchUsers(); getDomains().then(setDomains).catch(() => {}) }
     if (activeTab === 'security') fetchSettings()
   }, [activeTab])
 
@@ -139,12 +144,54 @@ export default function Admin() {
         display_name: user.display_name || '',
         is_super_admin: user.is_super_admin || false,
       })
+      setEditingUser(user)
       setUserModal(user.id)
     } else {
       setUserForm({ email: '', password: '', display_name: '', is_super_admin: false })
+      setEditingUser(null)
       setUserModal('new')
     }
+    setMemberForm({ domain_id: '', role: 'user' })
     setError('')
+  }
+
+  const refreshEditingUser = async (id) => {
+    const list = await getAdminUsers()
+    setUsers(list)
+    const found = list.find((u) => u.id === id)
+    if (found) setEditingUser(found)
+  }
+
+  const addMembership = async () => {
+    if (!memberForm.domain_id) return
+    setError('')
+    try {
+      await addUserDomain(editingUser.id, memberForm.domain_id, memberForm.role)
+      setMemberForm({ domain_id: '', role: 'user' })
+      await refreshEditingUser(editingUser.id)
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to add domain membership')
+    }
+  }
+
+  const changeMembershipRole = async (domainId, role) => {
+    setError('')
+    try {
+      await updateUserDomainRole(editingUser.id, domainId, role)
+      await refreshEditingUser(editingUser.id)
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to update role')
+    }
+  }
+
+  const removeMembership = async (domainId) => {
+    setError('')
+    try {
+      await removeUserDomain(editingUser.id, domainId)
+      await refreshEditingUser(editingUser.id)
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to remove domain membership')
+    }
   }
 
   const saveUser = async () => {
@@ -567,6 +614,62 @@ export default function Admin() {
                       />
                       <label htmlFor="user-admin" className="text-sm text-surface-700">Super Admin</label>
                     </div>
+
+                    {userModal !== 'new' && editingUser && (
+                      <div className="pt-2 border-t border-surface-200">
+                        <label className="block text-xs font-medium text-surface-600 mb-2">Domain Memberships</label>
+                        {(editingUser.memberships?.length ?? 0) === 0 && (
+                          <p className="text-xs text-surface-400 mb-2">No domains. User has no mailbox access until added.</p>
+                        )}
+                        <div className="space-y-1.5">
+                          {(editingUser.memberships || []).map((m) => (
+                            <div key={m.domain_id} className="flex items-center gap-2">
+                              <span className="flex-1 text-sm text-surface-700 truncate">{m.domain_name || m.domain_id}</span>
+                              <select
+                                value={m.role}
+                                onChange={(e) => changeMembershipRole(m.domain_id, e.target.value)}
+                                className="input-field !py-1 !text-xs w-28"
+                              >
+                                {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                              </select>
+                              <button
+                                onClick={() => removeMembership(m.domain_id)}
+                                className="p-1 rounded hover:bg-red-50"
+                                title="Remove domain"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-2 mt-2">
+                          <select
+                            value={memberForm.domain_id}
+                            onChange={(e) => setMemberForm({ ...memberForm, domain_id: e.target.value })}
+                            className="input-field !py-1 !text-xs flex-1"
+                          >
+                            <option value="">Add domain…</option>
+                            {domains
+                              .filter((d) => !(editingUser.memberships || []).some((m) => m.domain_id === d.id))
+                              .map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                          </select>
+                          <select
+                            value={memberForm.role}
+                            onChange={(e) => setMemberForm({ ...memberForm, role: e.target.value })}
+                            className="input-field !py-1 !text-xs w-28"
+                          >
+                            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                          <button
+                            onClick={addMembership}
+                            disabled={!memberForm.domain_id}
+                            className="btn-secondary !py-1 !text-xs disabled:opacity-40"
+                          >
+                            Add
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="flex justify-end gap-2 px-4 py-3 border-t border-surface-200">
                     <button onClick={() => setUserModal(null)} className="btn-secondary text-xs">Cancel</button>
