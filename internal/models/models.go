@@ -26,6 +26,7 @@ type Domain struct {
 	Name           string
 	PostmarkToken  string
 	PostmarkStream string
+	IsActive       bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	Settings       map[string]any

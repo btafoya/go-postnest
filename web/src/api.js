@@ -153,8 +153,61 @@ export async function getDomains() {
   return res.data.domains || []
 }
 
+export async function createDomain(data) {
+  const res = await api.post('/admin/api/v1/domains', data, { baseURL: '' })
+  return res.data
+}
+
+export async function updateDomain(id, data) {
+  const res = await api.put(`/admin/api/v1/domains/${id}`, data, { baseURL: '' })
+  return res.data
+}
+
+export async function deleteDomain(id) {
+  await api.delete(`/admin/api/v1/domains/${id}`, { baseURL: '' })
+}
+
+export async function toggleDomainActive(id, isActive) {
+  const res = await api.patch(`/admin/api/v1/domains/${id}/active`, { is_active: isActive }, { baseURL: '' })
+  return res.data
+}
+
 export async function getHealth() {
   const res = await api.get('/admin/api/v1/health', { baseURL: '' })
+  return res.data
+}
+
+export async function getAdminUsers(limit = 20, offset = 0) {
+  const res = await api.get(`/admin/api/v1/users?limit=${limit}&offset=${offset}`, { baseURL: '' })
+  return res.data.users || []
+}
+
+export async function createAdminUser(data) {
+  const res = await api.post('/admin/api/v1/users', data, { baseURL: '' })
+  return res.data
+}
+
+export async function updateAdminUser(id, data) {
+  const res = await api.put(`/admin/api/v1/users/${id}`, data, { baseURL: '' })
+  return res.data
+}
+
+export async function deleteAdminUser(id) {
+  await api.delete(`/admin/api/v1/users/${id}`, { baseURL: '' })
+}
+
+export async function resetAdminUserPassword(id, password) {
+  const res = await api.post(`/admin/api/v1/users/${id}/reset-password`, { password }, { baseURL: '' })
+  return res.data
+}
+
+export async function getAdminSettings() {
+  const res = await api.get('/admin/api/v1/settings', { baseURL: '' })
+  return res.data.settings || {}
+}
+
+export async function updateAdminSettings(settings) {
+  const res = await api.put('/admin/api/v1/settings', settings, { baseURL: '' })
   return res.data
 }
 

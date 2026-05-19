@@ -19,3 +19,4 @@ web/node_modules/
 web/package-lock.json
 # Playwright MCP test artifacts
 .playwright-mcp/
+.planning/

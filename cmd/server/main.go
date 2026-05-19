@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -61,13 +62,23 @@ func main() {
 	webmailHandler := webmail.NewHandler(mailStore, authService, redisClient, cfg.MaxAttachmentSize)
 	webhookHandler := webhook.NewHandler(redisClient, cfg.PostmarkWebhookSecret)
 
+	adminStore := admin.NewPGStore(pgPool.Pool)
+	settingsCache := admin.NewSettingsCache(adminStore, 30*time.Second)
+
 	r := chi.NewRouter()
 	// Middleware
 	r.Use(api.RequestID)
 	r.Use(api.StructuredLogger(log))
 	r.Use(api.Recovery)
 	r.Use(api.CORS(cfg.AllowedOrigins))
-	rateLimiter := api.NewRateLimiter(100, time.Minute)
+	rateLimiter := api.NewDynamicRateLimiter(func() int {
+		v := settingsCache.Get(context.Background(), "rate_limit_requests_per_minute")
+		n, _ := strconv.Atoi(v)
+		if n <= 0 {
+			return 100
+		}
+		return n
+	})
 	r.Use(rateLimiter.Handler)
 
 	// Public health
@@ -112,7 +123,6 @@ func main() {
 		contacts.NewHandler(contactsStore, authService).RegisterRoutes(r)
 	})
 
-	adminStore := admin.NewPGStore(pgPool.Pool)
 	adminHandler := admin.NewHandler(adminStore, authService)
 	healthHandler := admin.NewHealthHandler(pgPool.Pool, redisClient, imapAddr, smtpAddr, authService, mailStore)
 

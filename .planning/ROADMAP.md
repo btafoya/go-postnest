@@ -58,7 +58,9 @@ Plans:
 **Plans:** 3
 
 Plans:
-- [ ] 03-01: TBD
+- [ ] 03-01: Runtime SettingsCache + DynamicRateLimiter (PROD-02)
+- [ ] 03-02: Frontend success banners, pagination, password hints (FE-01..FE-05, PROD-01)
+- [ ] 03-03: Handler tests, health mock refactor, rate limiter tests (PROD-04, PROD-05)
 
 ## Progress
 
@@ -69,4 +71,4 @@ Phases execute in numeric order: 1 → 2 → 3
 |-------|----------------|--------|-----------|
 | 1. API Contracts & Error Handling | 2/2 | Complete | 2026-05-18 |
 | 2. Backend Logic & Validation | 2/3 | In Progress|  |
-| 3. Frontend Integration & Production Hardening | 0/TBD | Not started | - |
+| 3. Frontend Integration & Production Hardening | 0/3 | Not started | - |
