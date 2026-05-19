@@ -2,9 +2,6 @@ package webhook
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -74,8 +71,9 @@ func getDomainFromPayload(payload map[string]any, eventType string) string {
 }
 
 // verifySignature checks the webhook request against the domain's stored Postmark token.
-// Postmark sends the Server API Token in the X-Postmark-Server-Token header.
-func (h *Handler) verifySignature(ctx context.Context, domain string, body []byte, r *http.Request) bool {
+// The secret token is passed as a URL query parameter (e.g. ?token=...) configured in
+// Postmark's webhook URL, since Postmark does not send authentication headers.
+func (h *Handler) verifySignature(ctx context.Context, domain string, r *http.Request) bool {
 	if domain == "" {
 		return false
 	}
@@ -87,16 +85,7 @@ func (h *Handler) verifySignature(ctx context.Context, domain string, body []byt
 		return false
 	}
 
-	// Prefer HMAC-SHA256 signature verification.
-	if sig := r.Header.Get("X-Postmark-Signature"); sig != "" {
-		mac := hmac.New(sha256.New, []byte(token))
-		mac.Write(body)
-		expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-		return hmac.Equal([]byte(expected), []byte(sig))
-	}
-
-	// Fallback to Server API Token header.
-	tok := r.Header.Get("X-Postmark-Server-Token")
+	tok := r.URL.Query().Get("token")
 	return tok != "" && tok == token
 }
 
@@ -114,7 +103,7 @@ func (h *Handler) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := getDomainFromPayload(payload, "inbound")
-	if !h.verifySignature(r.Context(), domain, body, r) {
+	if !h.verifySignature(r.Context(), domain, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
@@ -144,7 +133,7 @@ func (h *Handler) handleBounce(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := getDomainFromPayload(payload, "bounce")
-	if !h.verifySignature(r.Context(), domain, body, r) {
+	if !h.verifySignature(r.Context(), domain, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
@@ -174,7 +163,7 @@ func (h *Handler) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := getDomainFromPayload(payload, "delivery")
-	if !h.verifySignature(r.Context(), domain, body, r) {
+	if !h.verifySignature(r.Context(), domain, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
@@ -204,7 +193,7 @@ func (h *Handler) handleSpam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := getDomainFromPayload(payload, "spam")
-	if !h.verifySignature(r.Context(), domain, body, r) {
+	if !h.verifySignature(r.Context(), domain, r) {
 		api.WriteError(w, api.ErrUnauthorized)
 		return
 	}
