@@ -204,7 +204,30 @@ Run as a containerized stack with PostgreSQL and Redis sidecars:
 ```bash
 cp .env.example .env
 # Edit .env, then:
-./scripts/install-docker.sh
+docker compose up -d --build
+```
+
+**Admin CLI (inside server container):**
+
+```bash
+# Create initial admin user + domain
+docker compose exec server postnest-admin setup \
+  -e admin@example.com -p secret -d example.com -n Admin
+
+# Add a user
+docker compose exec server postnest-admin create-user \
+  -e user@example.com -p secret -n "User Name"
+
+# Add a domain
+docker compose exec server postnest-admin create-domain -n example.com
+
+# Add domain member
+docker compose exec server postnest-admin add-member \
+  -d <domain-uuid> -u <user-uuid> -r admin
+
+# Reset password
+docker compose exec server postnest-admin reset-password \
+  -e user@example.com -p newpassword
 ```
 
 ### Nix Flake
