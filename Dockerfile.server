@@ -4,11 +4,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o postnest-server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o postnest-admin ./cmd/admin
 # Pre-create cert directory with nonroot ownership for final stage.
 RUN mkdir -p /var/lib/postnest/certs && chown 65532:65532 /var/lib/postnest/certs
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /build/postnest-server /usr/local/bin/postnest-server
+COPY --from=builder /build/postnest-admin /usr/local/bin/postnest-admin
 COPY --from=builder --chown=65532:65532 /var/lib/postnest/certs /var/lib/postnest/certs
 EXPOSE 8080 143 587 993 465
 ENTRYPOINT ["/usr/local/bin/postnest-server"]
