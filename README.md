@@ -119,7 +119,13 @@ Postmark inbound webhooks are verified using a per-domain secret token passed as
 
 #### Testing Inbound Locally
 
-A helper script is included for local webhook testing:
+A helper script is included for local webhook testing. It sends a full Postmark inbound JSON payload to your local PostNest instance and randomizes `MessageID` on each run to avoid Redis deduplication collisions.
+
+Prerequisites:
+- Server running locally (script posts to `http://192.168.25.165:2626` by default).
+- Domain configured with a Postmark token.
+
+Steps:
 
 ```bash
 # Set the webhook token for your domain
@@ -129,7 +135,7 @@ export POSTNEST_WEBHOOK_TOKEN="your-server-api-token"
 ./test-inbound.sh
 ```
 
-The script generates a random `MessageID` for each run to avoid Redis deduplication collisions.
+The script outputs the HTTP status code of the request. Verify the message lands in the target mailbox via IMAP or the webmail API.
 
 ### TLS (Optional)
 
