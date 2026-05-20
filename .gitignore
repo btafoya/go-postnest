@@ -19,3 +19,4 @@ web/node_modules/
 # Playwright MCP test artifacts
 .playwright-mcp/
 .planning/
+sent-folder-proof.png
