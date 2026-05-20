@@ -348,6 +348,7 @@ func (s *smtpSession) Data(r io.Reader) error {
 		ToAddresses:     s.to,
 		CcAddresses:     addressesToStrings(ccList),
 		BccAddresses:    addressesToStrings(bccList),
+		Date:            time.Now(),
 		PlainText:       textBody,
 		HTMLBody:        htmlBody,
 		IsOutbound:      true,
