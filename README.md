@@ -117,6 +117,20 @@ UPDATE domains SET postmark_token = 'your-server-api-token' WHERE name = 'exampl
 
 Postmark inbound webhooks are verified using a per-domain secret token passed as a URL query parameter (e.g. `?token=...`). Configure this token in the Postmark webhook URL. PostNest looks up the token by extracting the recipient domain from the webhook payload (`OriginalRecipient` or `To`) and verifying it against the stored token for that domain. Inbound mail hits the endpoint, gets parsed by the worker, and stored in PostgreSQL.
 
+#### Testing Inbound Locally
+
+A helper script is included for local webhook testing:
+
+```bash
+# Set the webhook token for your domain
+export POSTNEST_WEBHOOK_TOKEN="your-server-api-token"
+
+# Post to your local PostNest instance
+./test-inbound.sh
+```
+
+The script generates a random `MessageID` for each run to avoid Redis deduplication collisions.
+
 ### TLS (Optional)
 
 Provide certificate paths to enable TLS on IMAP and SMTP:
