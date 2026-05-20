@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -45,7 +46,11 @@ func readBody(r *http.Request) ([]byte, error) {
 }
 
 // extractDomain pulls the domain from an email address string.
+// It handles display names like "Name" <addr@domain.com>.
 func extractDomain(email string) string {
+	if addr, err := mail.ParseAddress(email); err == nil {
+		email = addr.Address
+	}
 	if i := strings.LastIndex(email, "@"); i >= 0 && i < len(email)-1 {
 		return strings.ToLower(email[i+1:])
 	}
@@ -56,8 +61,15 @@ func extractDomain(email string) string {
 func getDomainFromPayload(payload map[string]any, eventType string) string {
 	switch eventType {
 	case "inbound":
-		if v, ok := payload["OriginalRecipient"].(string); ok {
+		if v, ok := payload["OriginalRecipient"].(string); ok && v != "" {
 			return extractDomain(v)
+		}
+		if toFull, ok := payload["ToFull"].([]any); ok && len(toFull) > 0 {
+			if first, ok := toFull[0].(map[string]any); ok {
+				if v, ok := first["Email"].(string); ok {
+					return extractDomain(v)
+				}
+			}
 		}
 		if v, ok := payload["To"].(string); ok {
 			return extractDomain(v)

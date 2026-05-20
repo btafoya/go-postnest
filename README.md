@@ -115,7 +115,7 @@ Or update an existing domain directly:
 UPDATE domains SET postmark_token = 'your-server-api-token' WHERE name = 'example.com';
 ```
 
-Postmark inbound webhooks send the Server API Token in the `X-Postmark-Server-Token` header. PostNest looks up the token by extracting the recipient domain from the webhook payload (`OriginalRecipient` or `To`) and verifying it against the stored token for that domain. Inbound mail hits the endpoint, gets parsed by the worker, and stored in PostgreSQL.
+Postmark inbound webhooks are verified using a per-domain secret token passed as a URL query parameter (e.g. `?token=...`). Configure this token in the Postmark webhook URL. PostNest looks up the token by extracting the recipient domain from the webhook payload (`OriginalRecipient` or `To`) and verifying it against the stored token for that domain. Inbound mail hits the endpoint, gets parsed by the worker, and stored in PostgreSQL.
 
 ### TLS (Optional)
 

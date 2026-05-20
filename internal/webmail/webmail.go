@@ -202,13 +202,14 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 	u := h.currentUser(r)
 	q := r.URL.Query()
 	var labelID *uuid.UUID
-	var mailboxFilter string
+	did := h.domainID(r)
 	if v := q.Get("label_id"); v != "" {
 		switch v {
-		case "inbox":
-			mailboxFilter = "INBOX"
-		case "sent", "drafts", "trash", "junk":
-			mailboxFilter = strings.ToUpper(v)
+		case "inbox", "sent", "drafts", "trash", "junk", "important", "starred":
+			lbl, err := h.store.GetLabelByName(r.Context(), did, u.ID, strings.ToUpper(v))
+			if err == nil {
+				labelID = &lbl.ID
+			}
 		default:
 			id, err := uuid.Parse(v)
 			if err == nil {
@@ -216,16 +217,18 @@ func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		mailboxFilter = "INBOX"
+		lbl, err := h.store.GetLabelByName(r.Context(), did, u.ID, "INBOX")
+		if err == nil {
+			labelID = &lbl.ID
+		}
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	msgs, total, err := h.store.ListMessages(r.Context(), h.domainID(r), u.ID, labelID, mailstore.ListOptions{
+	msgs, total, err := h.store.ListMessages(r.Context(), did, u.ID, labelID, mailstore.ListOptions{
 		Limit:     limit,
 		Offset:    offset,
 		SortField: q.Get("sort"),
 		SortDesc:  true,
-		Mailbox:   mailboxFilter,
 	})
 	if err != nil {
 		api.WriteError(w, err)
