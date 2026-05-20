@@ -244,16 +244,43 @@ func main() {
 		}
 	}()
 
-	// SMTP server
-	smtpSrv := smtp.NewServer(smtpAddr, tlsConfig, allowInsecureAuth, mailStore, authService, postmarkClient, cfg.MaxMessageSize)
-	smtpCtx, smtpCancel := context.WithCancel(context.Background())
-	defer smtpCancel()
-	go func() {
-		log.Info("smtp server starting", "addr", smtpAddr, "tls", tlsConfig != nil)
-		if err := smtpSrv.Start(smtpCtx); err != nil {
-			log.Error("smtp server error", "error", err)
-		}
-	}()
+	// SMTP servers
+	var smtpSrv, startTLSSrv *smtp.Server
+	var smtpCancel, startTLSCancel context.CancelFunc
+
+	if tlsConfig != nil {
+		// Implicit TLS on 465
+		smtpSrv = smtp.NewServer(cfg.SMTPSAddr, tlsConfig, false, mailStore, authService, postmarkClient, cfg.MaxMessageSize)
+		var smtpCtx context.Context
+		smtpCtx, smtpCancel = context.WithCancel(context.Background())
+		go func() {
+			log.Info("smtp server starting", "addr", cfg.SMTPSAddr, "tls", true)
+			if err := smtpSrv.Start(smtpCtx); err != nil {
+				log.Error("smtp server error", "error", err)
+			}
+		}()
+
+		// STARTTLS on 587
+		startTLSSrv = smtp.NewStartTLSServer(cfg.SMTPAddr, tlsConfig, false, mailStore, authService, postmarkClient, cfg.MaxMessageSize)
+		var startTLSCtx context.Context
+		startTLSCtx, startTLSCancel = context.WithCancel(context.Background())
+		go func() {
+			log.Info("smtp server starting", "addr", cfg.SMTPAddr, "starttls", true)
+			if err := startTLSSrv.Start(startTLSCtx); err != nil {
+				log.Error("smtp starttls server error", "error", err)
+			}
+		}()
+	} else {
+		smtpSrv = smtp.NewServer(cfg.SMTPAddr, nil, allowInsecureAuth, mailStore, authService, postmarkClient, cfg.MaxMessageSize)
+		var smtpCtx context.Context
+		smtpCtx, smtpCancel = context.WithCancel(context.Background())
+		go func() {
+			log.Info("smtp server starting", "addr", cfg.SMTPAddr, "tls", false)
+			if err := smtpSrv.Start(smtpCtx); err != nil {
+				log.Error("smtp server error", "error", err)
+			}
+		}()
+	}
 
 	// DAV routes
 	davHandler := dav.NewHandler(authService, contactsStore, mailStore, calendarStore)
@@ -278,10 +305,16 @@ func main() {
 		log.Error("imap shutdown error", "error", err)
 	}
 
-	// Shutdown SMTP server
+	// Shutdown SMTP servers
 	smtpCancel()
 	if err := smtpSrv.Stop(); err != nil {
 		log.Error("smtp shutdown error", "error", err)
+	}
+	if startTLSCancel != nil {
+		startTLSCancel()
+		if err := startTLSSrv.Stop(); err != nil {
+			log.Error("smtp starttls shutdown error", "error", err)
+		}
 	}
 
 	// Shutdown certificate manager

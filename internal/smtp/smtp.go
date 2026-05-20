@@ -24,14 +24,24 @@ import (
 
 // Server wraps the go-smtp server.
 type Server struct {
-	addr   string
-	tlsCfg *tls.Config
-	srv    *smtp.Server
-	ln     net.Listener
+	addr     string
+	tlsCfg   *tls.Config
+	startTLS bool
+	srv      *smtp.Server
+	ln       net.Listener
 }
 
-// NewServer creates an SMTP server.
+// NewServer creates an SMTP server with implicit TLS when tlsCfg is set.
 func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store mailstore.Store, auth *auth.Service, pm *postmark.Client, maxMsgSize int64) *Server {
+	return newServer(addr, tlsCfg, allowInsecureAuth, false, store, auth, pm, maxMsgSize)
+}
+
+// NewStartTLSServer creates an SMTP server that advertises STARTTLS.
+func NewStartTLSServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store mailstore.Store, auth *auth.Service, pm *postmark.Client, maxMsgSize int64) *Server {
+	return newServer(addr, tlsCfg, allowInsecureAuth, true, store, auth, pm, maxMsgSize)
+}
+
+func newServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, startTLS bool, store mailstore.Store, auth *auth.Service, pm *postmark.Client, maxMsgSize int64) *Server {
 	be := &smtpBackend{store: store, auth: auth, postmark: pm, maxMsgSize: maxMsgSize}
 	s := smtp.NewServer(be)
 	s.Addr = addr
@@ -39,7 +49,7 @@ func NewServer(addr string, tlsCfg *tls.Config, allowInsecureAuth bool, store ma
 	if tlsCfg != nil {
 		s.TLSConfig = tlsCfg
 	}
-	return &Server{addr: addr, tlsCfg: tlsCfg, srv: s}
+	return &Server{addr: addr, tlsCfg: tlsCfg, startTLS: startTLS, srv: s}
 }
 
 // Start listens for SMTP connections.
@@ -48,7 +58,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if s.tlsCfg != nil {
+	if s.tlsCfg != nil && !s.startTLS {
 		ln = tls.NewListener(ln, s.tlsCfg)
 	}
 	s.ln = ln
