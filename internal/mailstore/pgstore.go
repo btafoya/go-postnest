@@ -139,7 +139,7 @@ func (s *PGStore) ListMessages(ctx context.Context, domainID, userID uuid.UUID, 
 	}
 
 	limit := opts.Limit
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 {
 		limit = 50
 	}
 	offset := opts.Offset
