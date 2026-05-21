@@ -58,6 +58,9 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 	r.Get("/api/v1/threads/{id}", h.getThread)
 
+	r.Get("/api/v1/messages/{id}/attachments", h.listMessageAttachments)
+	r.Get("/api/v1/messages/{id}/attachments/{attID}", h.downloadAttachment)
+
 	r.Post("/api/v1/drafts", h.createDraft)
 	r.Put("/api/v1/drafts/{id}", h.updateDraft)
 	r.Post("/api/v1/drafts/{id}/send", h.sendDraft)
@@ -255,7 +258,8 @@ func (h *Handler) getMessage(w http.ResponseWriter, r *http.Request) {
 			labelNames = append(labelNames, l.Name)
 		}
 	}
-	writeJSON(w, http.StatusOK, toMessageDTO(msg, labelNames))
+	atts, _ := h.store.ListMessageAttachments(r.Context(), msg.ID)
+	writeJSON(w, http.StatusOK, toMessageDTO(msg, labelNames, atts))
 }
 
 func (h *Handler) patchMessage(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +382,12 @@ func (h *Handler) getThread(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "messages": toMessageDTOs(msgs)})
+	var dtos []messageDTO
+	for _, m := range msgs {
+		atts, _ := h.store.ListMessageAttachments(r.Context(), m.ID)
+		dtos = append(dtos, toMessageDTO(m, nil, atts))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "messages": dtos})
 }
 
 func (h *Handler) createDraft(w http.ResponseWriter, r *http.Request) {
@@ -644,6 +653,63 @@ func (h *Handler) deleteAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) listMessageAttachments(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	if _, err := h.store.GetMessage(r.Context(), h.domainID(r), u.ID, id); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	atts, err := h.store.ListMessageAttachments(r.Context(), id)
+	if err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	out := make([]attachmentDTO, 0, len(atts))
+	for _, a := range atts {
+		out = append(out, attachmentDTO{
+			ID:          a.ID,
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			SizeBytes:   a.SizeBytes,
+			ContentID:   a.ContentID,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attachments": out})
+}
+
+func (h *Handler) downloadAttachment(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	attID, err := uuid.Parse(chi.URLParam(r, "attID"))
+	if err != nil {
+		api.WriteError(w, api.ErrValidation)
+		return
+	}
+	u := h.currentUser(r)
+	if _, err := h.store.GetMessage(r.Context(), h.domainID(r), u.ID, id); err != nil {
+		api.WriteError(w, err)
+		return
+	}
+	att, err := h.store.GetAttachment(r.Context(), attID)
+	if err != nil || att.MessageID != id {
+		api.WriteError(w, api.ErrNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", att.ContentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", att.Filename))
+	w.Header().Set("Content-Length", strconv.Itoa(len(att.Data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(att.Data)
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {

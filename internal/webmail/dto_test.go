@@ -23,7 +23,7 @@ func TestToMessageDTO_NestedAndSnakeCase(t *testing.T) {
 		Mailbox:      "DRAFTS",
 		Date:         time.Now(),
 	}
-	dto := toMessageDTO(m, []string{"INBOX"})
+	dto := toMessageDTO(m, []string{"INBOX"}, nil)
 
 	if dto.From.Email != "alice@example.com" {
 		t.Errorf("from.email = %q", dto.From.Email)
@@ -49,7 +49,7 @@ func TestToMessageDTO_NestedAndSnakeCase(t *testing.T) {
 }
 
 func TestToMessageDTO_NilLabelsIsEmptySlice(t *testing.T) {
-	dto := toMessageDTO(&models.Message{FromAddress: "x@y.com"}, nil)
+	dto := toMessageDTO(&models.Message{FromAddress: "x@y.com"}, nil, nil)
 	if dto.Labels == nil {
 		t.Fatal("labels must serialize as [] not null")
 	}

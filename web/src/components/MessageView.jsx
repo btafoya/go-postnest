@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import DOMPurify from 'dompurify'
 import { ArrowLeft, Reply, ReplyAll, Forward, Trash2, Archive, AlertCircle, Star, Paperclip, Printer, MoreVertical } from 'lucide-react'
-import { getMessage, patchMessage, deleteMessage } from '../api'
+import { getMessage, patchMessage, deleteMessage, getMessageAttachments, downloadAttachment } from '../api'
 
 export default function MessageView() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [message, setMessage] = useState(null)
+  const [attachments, setAttachments] = useState([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -15,6 +16,7 @@ export default function MessageView() {
     getMessage(id)
       .then((data) => {
         setMessage(data)
+        setAttachments(data.attachments || [])
         // Mark as read if unread
         if (!data.is_read) {
           patchMessage(id, { is_read: true }).catch(console.error)
@@ -32,6 +34,22 @@ export default function MessageView() {
   const handleToggleStar = async () => {
     await patchMessage(id, { is_flagged: !message.is_flagged })
     setMessage({ ...message, is_flagged: !message.is_flagged })
+  }
+
+  const handleDownload = async (att) => {
+    try {
+      const blob = await downloadAttachment(id, att.id)
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = att.filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Download failed:', err)
+    }
   }
 
   if (loading) {
@@ -106,6 +124,26 @@ export default function MessageView() {
           </div>
         </div>
       </div>
+
+      {/* Attachments */}
+      {attachments.length > 0 && (
+        <div className="px-6 py-3 border-b border-surface-200">
+          <div className="flex flex-wrap gap-2">
+            {attachments.map((att) => (
+              <button
+                key={att.id}
+                onClick={() => handleDownload(att)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-surface-100 hover:bg-surface-200 text-sm text-surface-700 transition-colors"
+                title={`${att.filename} (${att.size_bytes} bytes)`}
+              >
+                <Paperclip className="h-3.5 w-3.5" />
+                <span className="max-w-[200px] truncate">{att.filename}</span>
+                <span className="text-xs text-surface-400">({(att.size_bytes / 1024).toFixed(1)} KB)</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Message body */}
       <div className="flex-1 overflow-y-auto px-6 py-4">

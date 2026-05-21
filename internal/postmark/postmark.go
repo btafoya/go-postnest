@@ -117,6 +117,7 @@ type InboundAttachment struct {
 	Name        string `json:"Name"`
 	ContentType string `json:"ContentType"`
 	Content     string `json:"Content"` // base64 encoded
+	ContentID   string `json:"ContentID"`
 }
 
 // ParseInbound converts a raw JSON map to an InboundPayload.

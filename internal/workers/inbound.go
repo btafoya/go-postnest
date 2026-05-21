@@ -133,15 +133,19 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		}
 
 		var attachments []*models.Attachment
-		for _, d := range decoded {
-			attachments = append(attachments, &models.Attachment{
+		for i, d := range decoded {
+			att := &models.Attachment{
 				ID:          uuid.Must(uuid.NewV7()),
 				MessageID:   msg.ID,
 				Filename:    d.name,
 				ContentType: d.contentType,
 				SizeBytes:   len(d.data),
 				Data:        d.data,
-			})
+			}
+			if i < len(in.Attachments) {
+				att.ContentID = in.Attachments[i].ContentID
+			}
+			attachments = append(attachments, att)
 		}
 
 		inboxLabel, err := p.store.GetLabelByName(ctx, domain.ID, user.ID, "INBOX")

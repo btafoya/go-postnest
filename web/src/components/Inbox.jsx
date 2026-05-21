@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { Star, Trash2, Archive, AlertCircle, ChevronLeft, ChevronRight, RefreshCw, MoreVertical, CheckSquare, Square } from 'lucide-react'
+import { Star, Trash2, Archive, AlertCircle, ChevronLeft, ChevronRight, RefreshCw, MoreVertical, CheckSquare, Square, Paperclip } from 'lucide-react'
 import { getMessages, getLabels, patchMessage, batchMessages, deleteMessage } from '../api'
 import sse from '../sse'
 
@@ -180,7 +180,10 @@ export default function Inbox() {
                     <span className={msg.is_read ? 'text-surface-700' : 'text-surface-900 font-medium'}>{msg.subject || '(no subject)'}</span>
                     <span className="text-surface-400 ml-2">— {msg.snippet || ''}</span>
                   </span>
-                  <span className="text-xs text-surface-400 text-right">{formatDate(msg.date)}</span>
+                  <span className="text-xs text-surface-400 text-right flex items-center justify-end gap-1">
+                    {msg.has_attachment && <Paperclip className="h-3 w-3 text-surface-400" />}
+                    {formatDate(msg.date)}
+                  </span>
                 </div>
               </div>
             ))}

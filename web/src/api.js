@@ -293,6 +293,18 @@ export async function getTLSRenewStatus() {
   return res.data
 }
 
+export async function getMessageAttachments(id) {
+  const res = await api.get(`/messages/${id}/attachments`)
+  return res.data.attachments || []
+}
+
+export async function downloadAttachment(id, attID) {
+  const res = await api.get(`/messages/${id}/attachments/${attID}`, {
+    responseType: 'blob',
+  })
+  return res.data
+}
+
 export async function getContacts() {
   const res = await api.get('/contacts')
   return res.data.contacts || []
