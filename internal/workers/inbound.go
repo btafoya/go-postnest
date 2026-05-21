@@ -158,6 +158,9 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 		if err := p.store.CreateMessage(ctx, msg, []uuid.UUID{inboxLabel.ID}, attachments); err != nil {
 			return fmt.Errorf("create message for %s: %w", user.ID, err)
 		}
+		if _, _, err := p.store.GetOrCreateIMAPUID(ctx, msg.ID, user.ID, inboxLabel.Name); err != nil {
+			p.logger.Warn("failed to assign IMAP UID", "error", err, "message_id", msg.ID)
+		}
 
 		if err := p.store.UpdateSearchVector(ctx, msg.ID); err != nil {
 			p.logger.Warn("search vector update failed", "error", err, "message_id", msg.ID)

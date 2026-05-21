@@ -92,6 +92,11 @@ type Store interface {
 	CountTotalByLabel(ctx context.Context, domainID, userID uuid.UUID, labelID uuid.UUID) (int64, error)
 	CountsByLabel(ctx context.Context, domainID, userID uuid.UUID) (map[uuid.UUID]LabelCounts, error)
 
+	// UID/ModSeq
+	GetOrCreateIMAPUID(ctx context.Context, messageID uuid.UUID, userID uuid.UUID, mailbox string) (uint32, int64, error)
+	GetIMAPUID(ctx context.Context, messageID uuid.UUID, userID uuid.UUID, mailbox string) (uint32, int64, error)
+	GetMaxIMAPUID(ctx context.Context, userID uuid.UUID, mailbox string) (uint32, error)
+
 	CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error
 
 	CountMessagesToday(ctx context.Context) (int64, error)

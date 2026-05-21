@@ -107,6 +107,9 @@ func (p *SendProcessor) Process(ctx context.Context, job *Job) error {
 		p.logger.Error("failed to update sent draft", "error", err)
 		return fmt.Errorf("update message: %w", err)
 	}
+	if _, _, err := p.store.GetOrCreateIMAPUID(ctx, draftID, userID, "SENT"); err != nil {
+		p.logger.Warn("failed to assign IMAP UID for sent", "error", err, "message_id", draftID)
+	}
 
 	// Record delivery log for bounce/delivery webhook correlation.
 	dl := &models.DeliveryLog{

@@ -126,6 +126,15 @@ func (m *mockStore) DeleteAttachment(ctx context.Context, attachmentID uuid.UUID
 func (m *mockStore) CountMessagesToday(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error { return nil }
 func (m *mockStore) EnsureSystemLabels(ctx context.Context, domainID, userID uuid.UUID) error { return nil }
+func (m *mockStore) GetOrCreateIMAPUID(ctx context.Context, messageID, userID uuid.UUID, mailbox string) (uint32, int64, error) {
+	return 0, 0, nil
+}
+func (m *mockStore) GetIMAPUID(ctx context.Context, messageID, userID uuid.UUID, mailbox string) (uint32, int64, error) {
+	return 0, 0, nil
+}
+func (m *mockStore) GetMaxIMAPUID(ctx context.Context, userID uuid.UUID, mailbox string) (uint32, error) {
+	return 0, nil
+}
 
 // mockAuth implements just enough for domain context.
 type mockAuth struct{}

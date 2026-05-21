@@ -370,6 +370,10 @@ func (s *smtpSession) Data(r io.Reader) error {
 	}
 	if err := s.backend.store.CreateMessage(ctx, m, labelIDs, nil); err != nil {
 		slog.Default().Error("smtp: failed to store sent message", "error", err)
+	} else if sentLabel != nil {
+		if _, _, err := s.backend.store.GetOrCreateIMAPUID(ctx, m.ID, s.user.ID, sentLabel.Name); err != nil {
+			slog.Default().Error("smtp: failed to assign IMAP UID", "error", err)
+		}
 	}
 
 	return nil

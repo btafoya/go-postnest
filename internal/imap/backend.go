@@ -119,7 +119,7 @@ func (m *imapMailbox) Info() (*imap.MailboxInfo, error) {
 
 func (m *imapMailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, error) {
 	ctx := context.Background()
-	status := &imap.MailboxStatus{Name: m.label.Name}
+	status := imap.NewMailboxStatus(m.label.Name, items)
 	for _, item := range items {
 		switch item {
 		case imap.StatusMessages:
@@ -129,9 +129,8 @@ func (m *imapMailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, erro
 			unread, _ := m.backend.store.CountUnreadByLabel(ctx, m.domainID, m.user.ID, m.label.ID)
 			status.Unseen = uint32(unread)
 		case imap.StatusUidNext:
-			// Approximate next UID as total messages + 1.
-			total, _ := m.backend.store.CountTotalByLabel(ctx, m.domainID, m.user.ID, m.label.ID)
-			status.UidNext = uint32(total) + 1
+			maxUID, _ := m.backend.store.GetMaxIMAPUID(ctx, m.user.ID, m.label.Name)
+			status.UidNext = maxUID + 1
 		case imap.StatusUidValidity:
 			// Derive a stable validity value from the label ID.
 			id := m.label.ID[:]
@@ -144,6 +143,13 @@ func (m *imapMailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, erro
 			status.Recent = 0
 		}
 	}
+	// Set UnseenSeqNum for clients that expect it in SELECT response.
+	if status.Unseen > 0 {
+		status.UnseenSeqNum = 1
+	}
+	// Always populate Flags and PermanentFlags so SELECT sends required untagged responses.
+	status.Flags = []string{imap.SeenFlag, imap.AnsweredFlag, imap.FlaggedFlag, imap.DeletedFlag, imap.DraftFlag}
+	status.PermanentFlags = []string{imap.SeenFlag, imap.AnsweredFlag, imap.FlaggedFlag, imap.DeletedFlag, imap.DraftFlag}
 	return status, nil
 }
 
@@ -166,7 +172,7 @@ func (m *imapMailbox) ListMessages(uid bool, seqset *imap.SeqSet, items []imap.F
 
 	for i, msg := range msgs {
 		seqNum := uint32(i + 1)
-		msgUID := messageUID(msg)
+		msgUID := imapUID(m.backend.store, ctx, msg, m.user.ID, m.label.Name)
 		if seqset != nil {
 			if uid && !seqset.Contains(msgUID) {
 				continue
@@ -287,7 +293,7 @@ func (m *imapMailbox) UpdateMessagesFlags(uid bool, seqset *imap.SeqSet, operati
 
 	for i, msg := range msgs {
 		seqNum := uint32(i + 1)
-		msgUID := messageUID(msg)
+		msgUID := imapUID(m.backend.store, ctx, msg, m.user.ID, m.label.Name)
 		if seqset != nil {
 			if uid && !seqset.Contains(msgUID) {
 				continue
@@ -370,7 +376,7 @@ func (m *imapMailbox) CopyMessages(uid bool, seqset *imap.SeqSet, dest string) e
 
 	for i, msg := range msgs {
 		seqNum := uint32(i + 1)
-		msgUID := messageUID(msg)
+		msgUID := imapUID(m.backend.store, ctx, msg, m.user.ID, m.label.Name)
 		if seqset != nil {
 			if uid && !seqset.Contains(msgUID) {
 				continue
@@ -422,6 +428,22 @@ func messageUID(msg *models.Message) uint32 {
 		return 1
 	}
 	return uint32(msg.ID[0])<<24 | uint32(msg.ID[1])<<16 | uint32(msg.ID[2])<<8 | uint32(msg.ID[3])
+}
+
+func imapUID(store mailstore.Store, ctx context.Context, msg *models.Message, userID uuid.UUID, mailbox string) uint32 {
+	uid, _, err := store.GetIMAPUID(ctx, msg.ID, userID, mailbox)
+	if err != nil {
+		// Fall back to UUID-derived UID
+		return messageUID(msg)
+	}
+	if uid == 0 {
+		// Not yet assigned; create one
+		uid, _, err = store.GetOrCreateIMAPUID(ctx, msg.ID, userID, mailbox)
+		if err != nil {
+			return messageUID(msg)
+		}
+	}
+	return uid
 }
 
 func parseAddress(addr, name string) *imap.Address {

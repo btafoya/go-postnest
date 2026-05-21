@@ -652,6 +652,62 @@ func (s *PGStore) CountTotalByLabel(ctx context.Context, domainID, userID uuid.U
 	return count, err
 }
 
+// GetOrCreateIMAPUID returns the UID and modseq for a message in a mailbox,
+// creating a new entry if none exists. UID is sequential within user+mailbox.
+func (s *PGStore) GetOrCreateIMAPUID(ctx context.Context, messageID uuid.UUID, userID uuid.UUID, mailbox string) (uint32, int64, error) {
+	// Try to get existing
+	var uid int64
+	var modseq int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT uid, modseq FROM imap_uids WHERE message_id=$1 AND user_id=$2 AND mailbox=$3
+	`, messageID, userID, mailbox).Scan(&uid, &modseq)
+	if err == nil {
+		return uint32(uid), modseq, nil
+	}
+
+	// Insert new row with next UID via sequence
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO imap_uids (message_id, user_id, mailbox, modseq)
+		VALUES ($1, $2, $3, nextval('imap_uids_uid_seq'))
+		RETURNING uid, modseq
+	`, messageID, userID, mailbox).Scan(&uid, &modseq)
+	if err != nil {
+		return 0, 0, err
+	}
+	return uint32(uid), modseq, nil
+}
+
+// GetIMAPUID returns UID and modseq for an existing entry, or (0,0,nil) if absent.
+func (s *PGStore) GetIMAPUID(ctx context.Context, messageID uuid.UUID, userID uuid.UUID, mailbox string) (uint32, int64, error) {
+	var uid int64
+	var modseq int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT uid, modseq FROM imap_uids WHERE message_id=$1 AND user_id=$2 AND mailbox=$3
+	`, messageID, userID, mailbox).Scan(&uid, &modseq)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	return uint32(uid), modseq, nil
+}
+
+// GetMaxIMAPUID returns the highest UID currently assigned for a user+mailbox.
+func (s *PGStore) GetMaxIMAPUID(ctx context.Context, userID uuid.UUID, mailbox string) (uint32, error) {
+	var maxUID *int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT MAX(uid) FROM imap_uids WHERE user_id=$1 AND mailbox=$2
+	`, userID, mailbox).Scan(&maxUID)
+	if err != nil {
+		return 0, err
+	}
+	if maxUID == nil {
+		return 0, nil
+	}
+	return uint32(*maxUID), nil
+}
+
 // EnsureSystemLabels creates default system labels for a user if they don't exist.
 func (s *PGStore) EnsureSystemLabels(ctx context.Context, domainID, userID uuid.UUID) error {
 	names := []string{"INBOX", "SENT", "DRAFTS", "TRASH", "JUNK", "IMPORTANT", "STARRED", "ALL_MAIL"}
