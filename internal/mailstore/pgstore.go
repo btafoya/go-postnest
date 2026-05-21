@@ -652,6 +652,22 @@ func (s *PGStore) CountTotalByLabel(ctx context.Context, domainID, userID uuid.U
 	return count, err
 }
 
+// EnsureSystemLabels creates default system labels for a user if they don't exist.
+func (s *PGStore) EnsureSystemLabels(ctx context.Context, domainID, userID uuid.UUID) error {
+	names := []string{"INBOX", "SENT", "DRAFTS", "TRASH", "JUNK", "IMPORTANT", "STARRED", "ALL_MAIL"}
+	for _, name := range names {
+		_, err := s.pool.Exec(ctx, `
+			INSERT INTO labels (id, domain_id, user_id, name, color, is_system, created_at)
+			VALUES (gen_random_uuid(), $1, $2, $3, '#4285f4', true, now())
+			ON CONFLICT (domain_id, user_id, name) DO NOTHING
+		`, domainID, userID, name)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CountsByLabel returns total and unread counts for every label in one query.
 func (s *PGStore) CountsByLabel(ctx context.Context, domainID, userID uuid.UUID) (map[uuid.UUID]LabelCounts, error) {
 	rows, err := s.pool.Query(ctx, `

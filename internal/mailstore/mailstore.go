@@ -95,4 +95,6 @@ type Store interface {
 	CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error
 
 	CountMessagesToday(ctx context.Context) (int64, error)
+
+	EnsureSystemLabels(ctx context.Context, domainID, userID uuid.UUID) error
 }

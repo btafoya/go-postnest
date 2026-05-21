@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/go-postnest/postnest/internal/auth"
@@ -148,19 +147,12 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 			attachments = append(attachments, att)
 		}
 
+		if err := p.store.EnsureSystemLabels(ctx, domain.ID, user.ID); err != nil {
+			return fmt.Errorf("ensure system labels for %s: %w", user.ID, err)
+		}
 		inboxLabel, err := p.store.GetLabelByName(ctx, domain.ID, user.ID, "INBOX")
 		if err != nil {
-			if err == mailstore.ErrNotFound {
-				if seedErr := p.seedSystemLabels(ctx, domain.ID, user.ID); seedErr != nil {
-					return fmt.Errorf("seed system labels for %s: %w", user.ID, seedErr)
-				}
-				inboxLabel, err = p.store.GetLabelByName(ctx, domain.ID, user.ID, "INBOX")
-				if err != nil {
-					return fmt.Errorf("inbox label lookup after seed for %s: %w", user.ID, err)
-				}
-			} else {
-				return fmt.Errorf("inbox label lookup for %s: %w", user.ID, err)
-			}
+			return fmt.Errorf("inbox label lookup for %s: %w", user.ID, err)
 		}
 
 		if err := p.store.CreateMessage(ctx, msg, []uuid.UUID{inboxLabel.ID}, attachments); err != nil {
@@ -182,33 +174,3 @@ func (p *InboundProcessor) Process(ctx context.Context, job *Job) error {
 	return nil
 }
 
-// seedSystemLabels creates default system labels for a user if they don't exist.
-func (p *InboundProcessor) seedSystemLabels(ctx context.Context, domainID, userID uuid.UUID) error {
-	names := []string{"INBOX", "SENT", "DRAFTS", "TRASH", "JUNK", "IMPORTANT", "STARRED", "ALL_MAIL"}
-	for _, name := range names {
-		label := &models.Label{
-			ID:        uuid.Must(uuid.NewV7()),
-			DomainID:  domainID,
-			UserID:    userID,
-			Name:      name,
-			Color:     "#4285f4",
-			IsSystem:  true,
-			CreatedAt: time.Now().UTC(),
-		}
-		if err := p.store.CreateLabel(ctx, label); err != nil {
-			// Ignore unique violations (label already exists from concurrent seeding).
-			if !isUniqueViolation(err) {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	// pgx unique-violation SQLSTATE is 23505
-	return strings.Contains(err.Error(), "23505") || strings.Contains(err.Error(), "unique violation")
-}

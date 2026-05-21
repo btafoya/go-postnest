@@ -125,6 +125,7 @@ func (m *mockStore) ListMessageAttachments(ctx context.Context, messageID uuid.U
 func (m *mockStore) DeleteAttachment(ctx context.Context, attachmentID uuid.UUID) error { return nil }
 func (m *mockStore) CountMessagesToday(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockStore) CreateDeliveryLog(ctx context.Context, log *models.DeliveryLog) error { return nil }
+func (m *mockStore) EnsureSystemLabels(ctx context.Context, domainID, userID uuid.UUID) error { return nil }
 
 // mockAuth implements just enough for domain context.
 type mockAuth struct{}

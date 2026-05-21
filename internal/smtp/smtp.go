@@ -193,26 +193,29 @@ func (s *smtpSession) Data(r io.Reader) error {
 	}
 
 	maxSize := s.backend.maxMsgSize
+	var raw []byte
+	var err error
 	if maxSize > 0 {
-		body, err := io.ReadAll(io.LimitReader(r, maxSize+1))
-		if err != nil {
-			return &smtp.SMTPError{
-				Code:         451,
-				EnhancedCode: smtp.EnhancedCode{4, 4, 5},
-				Message:      "failed to read message",
-			}
+		raw, err = io.ReadAll(io.LimitReader(r, maxSize+1))
+	} else {
+		raw, err = io.ReadAll(r)
+	}
+	if err != nil {
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 4, 5},
+			Message:      "failed to read message",
 		}
-		if int64(len(body)) > maxSize {
-			return &smtp.SMTPError{
-				Code:         552,
-				EnhancedCode: smtp.EnhancedCode{5, 3, 4},
-				Message:      "message exceeds maximum size",
-			}
+	}
+	if maxSize > 0 && int64(len(raw)) > maxSize {
+		return &smtp.SMTPError{
+			Code:         552,
+			EnhancedCode: smtp.EnhancedCode{5, 3, 4},
+			Message:      "message exceeds maximum size",
 		}
-		r = bytes.NewReader(body)
 	}
 
-	mr, err := gomail.CreateReader(r)
+	mr, err := gomail.CreateReader(bytes.NewReader(raw))
 	if err != nil {
 		return &smtp.SMTPError{
 			Code:         451,
@@ -332,6 +335,11 @@ func (s *smtpSession) Data(r io.Reader) error {
 		}
 	}
 
+	// Ensure system labels exist before looking up SENT.
+	if err := s.backend.store.EnsureSystemLabels(ctx, domain.ID, s.user.ID); err != nil {
+		slog.Default().Error("smtp: failed to ensure system labels", "error", err)
+	}
+
 	// Store copy in Sent
 	sentLabel, err := s.backend.store.GetLabelByName(ctx, domain.ID, s.user.ID, "SENT")
 	if err != nil {
@@ -351,6 +359,8 @@ func (s *smtpSession) Data(r io.Reader) error {
 		Date:            time.Now(),
 		PlainText:       textBody,
 		HTMLBody:        htmlBody,
+		Source:          raw,
+		SizeBytes:       len(raw),
 		IsOutbound:      true,
 		IsRead:          true,
 	}
