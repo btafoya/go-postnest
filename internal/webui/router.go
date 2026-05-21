@@ -45,6 +45,9 @@ func NewRouter(cfg Config) *gin.Engine {
 		"/healthz",
 		"/.well-known/*path",
 		"/dav/*path",
+		"/autodiscover/*path",
+		"/mail/config-v1.1.xml",
+		"/email.mobileconfig",
 	}
 	for _, route := range apiRoutes {
 		r.Any(route, proxy.Handle)
@@ -60,6 +63,9 @@ func NewRouter(cfg Config) *gin.Engine {
 			strings.HasPrefix(c.Request.URL.Path, "/events") ||
 			strings.HasPrefix(c.Request.URL.Path, "/dav/") ||
 			strings.HasPrefix(c.Request.URL.Path, "/.well-known/") ||
+			strings.HasPrefix(c.Request.URL.Path, "/autodiscover/") ||
+			strings.HasPrefix(c.Request.URL.Path, "/mail/") ||
+			strings.HasPrefix(c.Request.URL.Path, "/email.mobileconfig") ||
 			c.Request.URL.Path == "/healthz" {
 			c.Next()
 			return

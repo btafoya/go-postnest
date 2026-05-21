@@ -16,6 +16,7 @@ import (
 	"github.com/go-postnest/postnest/internal/admin"
 	"github.com/go-postnest/postnest/internal/api"
 	"github.com/go-postnest/postnest/internal/auth"
+	"github.com/go-postnest/postnest/internal/autodiscover"
 	"github.com/go-postnest/postnest/internal/calendar"
 	"github.com/go-postnest/postnest/internal/certmanager"
 	"github.com/go-postnest/postnest/internal/config"
@@ -285,6 +286,10 @@ func main() {
 	// DAV routes
 	davHandler := dav.NewHandler(authService, contactsStore, mailStore, calendarStore)
 	davHandler.RegisterRoutes(r)
+
+	// Public autodiscover routes (needs certMgr from TLS strategy above)
+	autodiscoverHandler := autodiscover.NewHandler(authService, certMgr, log)
+	autodiscoverHandler.RegisterRoutes(r)
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
